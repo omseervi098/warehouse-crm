@@ -1,0 +1,27 @@
+{
+    "appId": "com.warehouse.crm",
+    "productName": "Warehouse CRM",
+    "files": [
+        "dist-electron",
+        "dist-react"
+    ],
+    "extraResources": [
+        "dist-electron/preload.cjs",
+        "dist-electron/pdfPreviewPreload.cjs",
+        "src/assets/**",
+        ".env"
+    ],
+    "icon": "./src/assets/logo_transparent.png",
+    "mac": {
+        "target": "dmg"
+    },
+    "linux": {
+        "target": "AppImage",
+        "category": "Utility"
+    },
+    "win": {
+        "target": [
+            "nsis"
+        ]
+    }
+}

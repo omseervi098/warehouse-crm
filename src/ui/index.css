@@ -1,0 +1,361 @@
+@import "tailwindcss";
+
+/* Custom animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes slideInUp {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+.animate-scaleIn {
+  animation: scaleIn 0.2s ease-out forwards;
+}
+
+.animate-slideInUp {
+  animation: slideInUp 0.2s ease-out forwards;
+}
+
+/* Custom scrollbar */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 3px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: #94a3b8;
+}
+
+/* Dark mode scrollbar */
+.dark .scrollbar-thin {
+  scrollbar-color: #475569 #1e293b;
+}
+
+.dark .scrollbar-thin::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+.dark .scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: #475569;
+}
+
+.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: #64748b;
+}
+
+/* Button focus states */
+button:focus-visible,
+a:focus-visible,
+[tabindex="0"]:focus-visible {
+  outline: 2px solid #ea580c;
+  outline-offset: 2px;
+  border-radius: 0.25rem;
+}
+
+/* Form elements focus states */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(234, 88, 12, 0.5);
+}
+
+/* Disabled state styling */
+:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Define your theme variables here */
+@theme {
+  /* Font Family */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  
+  /* Light Mode Colors */
+  --color-brand-primary: #1e293b; /* slate-800 */
+  --color-brand-secondary: #334155; /* slate-700 */
+  --color-accent: #ea580c; /* orange-600 */
+  --color-accent-hover: #c2410c; /* orange-700 */
+  
+  /* Apply the colors to Tailwind's color system */
+  --color-slate-800: var(--color-brand-primary);
+  --color-slate-700: var(--color-brand-secondary);
+  --color-orange-600: var(--color-accent);
+  --color-orange-700: var(--color-accent-hover);
+  
+  /* Add any other theme customizations below */
+}
+
+/* Dark Mode CSS Variables */
+:root {
+  /* Light mode colors */
+  --bg-primary: #f2f5fb; /* cooler off-white for stronger card contrast */
+  --bg-secondary: #e9eef6; /* slightly deeper */
+  --bg-tertiary: #dde6f1; /* used for stripes/separators */
+  --bg-sidebar: #1e293b;
+  --bg-card: #ffffff; /* cards pop against primary */
+  --bg-input: #ffffff;
+  --bg-hover: #dbe3ef; /* more pronounced hover */
+  
+  --text-primary: #1e293b;
+  --text-secondary: #283444;
+  --text-muted: #515f71;
+  --text-inverse: #ffffff;
+  
+  --border-primary: #d1d9e6; /* stronger border for separation */
+  --border-secondary: #b8c4d6;
+  --border-accent: #ea580c;
+  
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+.dark {
+  /* Dark mode colors */
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --bg-sidebar: #0f172a;
+  --bg-card: #1e293b;
+  --bg-input: #334155;
+  --bg-hover: #475569;
+  
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #d0d8e4;
+  --text-inverse: #0f172a;
+  
+  --border-primary: #334155;
+  --border-secondary: #475569;
+  --border-accent: #ea580c;
+  
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+}
+
+/* Apply CSS variables to common elements */
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Background utilities */
+.bg-theme-primary { background-color: var(--bg-primary); }
+.bg-theme-secondary { background-color: var(--bg-secondary); }
+.bg-theme-tertiary { background-color: var(--bg-tertiary); }
+.bg-theme-sidebar { background-color: var(--bg-sidebar); }
+.bg-theme-card { background-color: var(--bg-card); }
+.bg-theme-input { background-color: var(--bg-input); }
+.bg-theme-hover { background-color: var(--bg-hover); }
+
+/* Text utilities */
+.text-theme-primary { color: var(--text-primary); }
+.text-theme-secondary { color: var(--text-secondary); }
+.text-theme-muted { color: var(--text-muted); }
+.text-theme-inverse { color: var(--text-inverse); }
+
+/* Border utilities */
+.border-theme-primary { border-color: var(--border-primary); }
+.border-theme-secondary { border-color: var(--border-secondary); }
+.border-theme-accent { border-color: var(--border-accent); }
+
+/* Shadow utilities */
+.shadow-theme-sm { box-shadow: var(--shadow-sm); }
+.shadow-theme-md { box-shadow: var(--shadow-md); }
+.shadow-theme-lg { box-shadow: var(--shadow-lg); }
+
+/* Dark mode specific overrides */
+.dark .bg-slate-100 { background-color: var(--bg-secondary); }
+.dark .bg-white { background-color: var(--bg-card); }
+.dark .text-slate-600 { color: var(--text-secondary); }
+.dark .text-slate-800 { color: var(--text-primary); }
+.dark .border-slate-200 { border-color: var(--border-primary); }
+.dark .border-slate-300 { border-color: var(--border-secondary); }
+
+/* Smooth transitions for theme switching */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Custom Scrollbar Styles */
+/* For Firefox */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9; /* thumb: slate-400, track: slate-100 */
+}
+
+/* For WebKit browsers (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+  width: 10px; /* Width of the vertical scrollbar */
+  height: 10px; /* Height of the horizontal scrollbar */
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9; /* slate-100 */
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #94a3b8; /* slate-400 */
+  border-radius: 10px;
+  border: 2px solid #f1f5f9; /* Creates padding around thumb */
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #64748b; /* slate-500 */
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Responsive Table Styles */
+.responsive-table-wrapper {
+  overflow-x: auto;
+}
+
+/* Mobile Styles */
+@media (max-width: 767px) {
+  .responsive-table-wrapper {
+    border: none !important;
+    box-shadow: none !important;
+    background-color: transparent !important;
+    overflow-x: visible !important;
+  }
+
+  .responsive-table thead {
+    display: none;
+  }
+
+  .responsive-table tbody,
+  .responsive-table tfoot,
+  .responsive-table tr {
+    display: block;
+  }
+
+  .responsive-table tr {
+    margin-bottom: 1rem;
+    border: 1px solid var(--border-primary);
+    border-radius: 0.75rem; /* rounded-xl */
+    background-color: var(--bg-card);
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+
+  .responsive-table tbody tr {
+    padding: 0.25rem 0;
+  }
+
+  .responsive-table tbody tr:hover {
+    background-color: var(--bg-hover) !important; /* Override hover on desktop */
+  }
+  
+  .responsive-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    text-align: right !important;
+    border-top: none !important;
+  }
+  
+  .responsive-table tbody td:not(:last-child) {
+    border-bottom: 1px solid var(--border-primary);
+  }
+
+  .responsive-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: left;
+    margin-right: 1rem;
+    flex-shrink: 0;
+  }
+  
+  /* Reset Tailwind dividers */
+  .responsive-table-wrapper .divide-y,
+  .responsive-table .divide-y,
+  .responsive-table-wrapper .divide-y > :not([hidden]) ~ :not([hidden]),
+  .responsive-table .divide-y > :not([hidden]) ~ :not([hidden]) {
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
+
+  /* Responsive Footer for Charges Page */
+  .responsive-table tfoot tr {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    background-color: var(--bg-secondary);
+  }
+  
+  .responsive-table tfoot td {
+    border-bottom: none !important;
+  }
+  
+  .responsive-table tfoot td[colspan] {
+    display: inline;
+    padding: 0;
+    text-align: left;
+    font-size: 1rem;
+    line-height: 1;
+  }
+  
+  .responsive-table tfoot td:not([colspan]):not(:empty) {
+    display: inline;
+    padding: 0;
+    text-align: right;
+    font-size: 1.125rem;
+    line-height: 1;
+  }
+  
+  .responsive-table tfoot td:empty {
+    display: none;
+  }
+}
+
+/* Desktop Styles */
+@media (min-width: 768px) {
+  .responsive-table-wrapper {
+    overflow-x: auto;
+  }
+}
+
+/* Electron draggable window regions */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
