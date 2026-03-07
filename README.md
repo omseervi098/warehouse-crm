@@ -40,8 +40,10 @@ Warehouse CRM is a desktop application built to streamline warehouse management,
 - `npm run dist:linux`: Builds and packages the app for Linux (`.AppImage`).
 
 ## Features
-
-- **Stock Management:** Add, edit, and check real-time stock balances per party and unit type.
+- **Entries Managment:** Add, edit and check `INWARD`, `OUTWARD`, `RETURN` entries. 
+- **Stock Management:** check real-time stock balances per party.
 - **Reporting & Billing:** Generate detailed PDF reports for bills, history, gatepasses, and charges via dynamic PDF building.
-- **Dynamic Configuration:** SMTP and Database details are configured dynamically via the UI setup or app settings rather than hardcoded environment variables.
-- **Company Profile:** Highly customizable company branding including name, address, and logo for exported files.
+- **Dynamic Configuration:** SMTP and Database details are configured dynamically via the UI setup.
+- **Company Profile:** Add your own company profile.
+- **Automatic Charge Calculation:** Autocalulate charges for each lot or stock based on unit price per month set in MasterPage.
+- **Field Level Encryption:** Field level encryption for certain fields like company data or party data.
