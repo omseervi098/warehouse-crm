@@ -584,6 +584,12 @@ declare global {
           endDate?: string;
         }) => Promise<{ ok: boolean; data?: BillingHistoryItem[]; error?: string }>;
       };
+      autobackup: {
+        getConfig: () => Promise<{ ok: boolean; data?: { frequency: string; directory: string } | null; error?: string }>;
+        setConfig: (config: { frequency: string; directory: string }) => Promise<{ ok: boolean; error?: string }>;
+        selectDirectory: () => Promise<{ ok: boolean; data?: string; error?: string }>;
+        triggerBackup: () => Promise<{ ok: boolean; data?: string; error?: string }>;
+      };
       db: {
         listCollections: () => Promise<{ ok: boolean; data?: string[]; error?: string }>;
         dropCollections: (names: string[]) => Promise<{ ok: boolean; data?: { dropped: string[]; failed: { name: string; error: string }[] }; error?: string }>;

@@ -96,6 +96,12 @@ contextBridge.exposeInMainWorld('electron', {
             return await ipcRenderer.invoke('email:sendMonthlyReport', { month, year, partyId });
         }
     },
+    autobackup: {
+        getConfig: async () => ipcRenderer.invoke('autobackup:getConfig'),
+        setConfig: async (config: any) => ipcRenderer.invoke('autobackup:setConfig', config),
+        selectDirectory: async () => ipcRenderer.invoke('autobackup:selectDirectory'),
+        triggerBackup: async () => ipcRenderer.invoke('autobackup:triggerBackup'),
+    },
     db: {
         listCollections: async () => ipcRenderer.invoke('db:listCollections'),
         dropCollections: async (names: string[]) => ipcRenderer.invoke('db:dropCollections', names),

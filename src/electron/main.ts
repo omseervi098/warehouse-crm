@@ -704,6 +704,14 @@ function registerIpcHandlers() {
                     };
                     docs = docs.map((d: any) => fixDates(d));
 
+                    const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                    if (Model && Model.schema) {
+                        const middleware = new MongooseEncryptionMiddleware();
+                        for (const doc of docs) {
+                             await middleware.encryptFields(doc, Model.schema);
+                        }
+                    }
+
                     if (!docs || docs.length === 0) { summary.skipped.push({ name, reason: 'No documents' }); continue; }
                     const coll = db.collection(name);
                     const res = await coll.insertMany(docs, { ordered: false });
@@ -738,6 +746,15 @@ function registerIpcHandlers() {
                 if (!exists) continue;
                 const coll = db.collection(name);
                 const docs = await coll.find({}).toArray();
+                
+                const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                if (Model && Model.schema) {
+                    const middleware = new MongooseEncryptionMiddleware();
+                    for (const doc of docs) {
+                         await middleware.decryptFields(doc, Model.schema);
+                    }
+                }
+                
                 let content = '';
                 let fileName = '';
                 if (format === 'json') {
@@ -777,6 +794,108 @@ function registerIpcHandlers() {
             return { ok: false, error: err.message };
         }
     });
+
+    // --- Backup Extraction Utility ---
+    const generateBackupZipPath = async (dirPath: string): Promise<string | null> => {
+        try {
+            await initMongo();
+            const nativeDb = mongoose.connection.db;
+            if (!nativeDb) throw new Error('DB not initialized');
+            const collections = await nativeDb.listCollections().toArray();
+            const names = collections.map((c: any) => c.name);
+            
+            const zip = new AdmZip();
+            for (const name of names) {
+                const coll = nativeDb.collection(name);
+                const docs = await coll.find({}).toArray();
+                const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                if (Model && Model.schema) {
+                    const middleware = new MongooseEncryptionMiddleware();
+                    for (const doc of docs) {
+                         await middleware.decryptFields(doc, Model.schema);
+                    }
+                }
+                const content = JSON.stringify(docs, null, 2);
+                zip.addFile(`${name}.json`, Buffer.from(content, 'utf8'));
+            }
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const finalPath = path.join(dirPath, `autobackup_${stamp}.zip`);
+            zip.writeZip(finalPath);
+            return finalPath;
+        } catch(e) { console.error('Backup generation error:', e); return null; }
+    };
+
+    // Auto Backup API Handlers
+    ipcMain.handle('autobackup:getConfig', async () => {
+        try {
+            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
+            if(configStr) {
+                return { ok: true, data: JSON.parse(configStr) };
+            }
+            return { ok: true, data: null };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:setConfig', async (_e, config: { frequency: string, directory: string }) => {
+        try {
+            await keytar.setPassword('WarehouseCRM', 'AutoBackup', JSON.stringify(config));
+            await setupBackupCron();
+            return { ok: true };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:selectDirectory', async () => {
+        try {
+            const { canceled, filePaths } = await dialog.showOpenDialog({
+                title: 'Select Backup Directory',
+                properties: ['openDirectory', 'createDirectory']
+            });
+            if (canceled || filePaths.length === 0) return { ok: false, error: 'Canceled' };
+            return { ok: true, data: filePaths[0] };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:triggerBackup', async () => {
+        try {
+            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
+            if(!configStr) throw new Error('Not configured');
+            const config = JSON.parse(configStr);
+            const zipPath = await generateBackupZipPath(config.directory);
+            if(zipPath) return { ok: true, data: zipPath };
+            throw new Error('Failed to generate zip');
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // --- CRON SCHEDULING ---
+    let activeCronTask: any = null;
+    const setupBackupCron = async () => {
+        try {
+            const cron = (await import('node-cron')).default;
+            if (activeCronTask) {
+                activeCronTask.stop();
+                activeCronTask = null;
+            }
+            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
+            if (configStr) {
+                const config = JSON.parse(configStr);
+                if (config.frequency && config.frequency !== 'never' && config.directory) {
+                    let expr = '0 0 * * *'; // daily
+                    if (config.frequency === 'weekly') expr = '0 0 * * 0'; // Sundays
+                    else if (config.frequency === 'monthly') expr = '0 0 1 * *'; // 1st of month
+
+                    console.log(`[Cron] Initializing Local Autobackup: ${config.frequency} (${expr})`);
+                    activeCronTask = cron.schedule(expr, async () => {
+                        console.log('[Cron] Running scheduled backup...');
+                        await generateBackupZipPath(config.directory);
+                    });
+                }
+            }
+        } catch (e) { console.error('[Cron Init Error]', e); }
+    };
+
+    // run setup once lazily to avoid holding up the process
+    setTimeout(setupBackupCron, 5000);
+
 
     ipcMain.handle('company:get', async () => {
         try {

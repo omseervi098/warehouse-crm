@@ -90,6 +90,13 @@ const SettingsPage: React.FC = () => {
   } | null>(null);
   const [showDecryptionProgress, setShowDecryptionProgress] = useState(false);
 
+  // Auto Backup Sync state
+  const [backupLoading, setBackupLoading] = useState(true);
+  const [hasBackupConfig, setHasBackupConfig] = useState(false);
+  const [backupFreq, setBackupFreq] = useState('never');
+  const [backupDir, setBackupDir] = useState('');
+  const [settingBackup, setSettingBackup] = useState(false);
+
   const selectedNames = useMemo(() => Object.keys(selected).filter(k => selected[k]), [selected]);
 
   const loadCollections = async () => {
@@ -606,6 +613,54 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  const loadBackupStatus = async () => {
+    setBackupLoading(true);
+    try {
+      const res = await window.electron?.autobackup?.getConfig?.();
+      if (res?.ok && res.data) {
+         setHasBackupConfig(true);
+         setBackupFreq(res.data.frequency || 'never');
+         setBackupDir(res.data.directory || '');
+      } else {
+         setHasBackupConfig(false);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleSelectBackupDir = async () => {
+      try {
+          const res = await window.electron?.autobackup?.selectDirectory?.();
+          if(res?.ok && res.data) {
+             setBackupDir(res.data);
+          }
+      } catch(e: any) { toast.error(e?.message); }
+  };
+
+  const handleSetBackupConfig = async () => {
+     if (backupFreq !== 'never' && !backupDir.trim()) {
+        toast.error('Directory is required to enable backup.');
+        return;
+     }
+     setSettingBackup(true);
+     try {
+       const res = await window.electron?.autobackup?.setConfig?.({
+          directory: backupDir.trim(),
+          frequency: backupFreq
+       });
+       if(res?.ok) {
+          toast.success('Local auto-backup configuration saved!');
+          await loadBackupStatus();
+       } else {
+          toast.error(res?.error || 'Failed to save configuration');
+       }
+     } catch (e: any) { toast.error(e?.message); }
+     setSettingBackup(false);
+  };
+
   useEffect(() => {
     let mounted = true;
     async function check() {
@@ -622,6 +677,7 @@ const SettingsPage: React.FC = () => {
     check();
     loadEncryptionStatus();
     loadEmailStatus();
+    loadBackupStatus();
     return () => { mounted = false; };
   }, []);
 
@@ -1273,6 +1329,56 @@ const SettingsPage: React.FC = () => {
           Note: Gmail credentials are stored securely in your system keychain. Email reports are sent to parties' organization email addresses.
         </div>
       </div>
+
+      {/* Local Auto Backup Configuration Card */}
+      <div className="bg-theme-card border border-theme-primary rounded-lg p-6 space-y-4 mt-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-medium">Auto-Backup to Local File System</h2>
+            <p className="text-sm text-theme-secondary">Configure automated background backups to a secure directory on your computer.</p>
+          </div>
+          <span className={`text-xs px-2 py-1 rounded ${hasBackupConfig && backupFreq !== 'never' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+            {backupLoading ? 'Checking…' : (hasBackupConfig && backupFreq !== 'never') ? 'Active' : 'Disabled'}
+          </span>
+        </div>
+
+        <div className="space-y-4">
+           {hasBackupConfig && backupFreq !== 'never' && (
+              <div className="p-4 bg-green-500/10 border border-green-500/20 rounded">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                  <span className="text-sm font-medium text-green-400">Backups Active</span>
+                </div>
+                <p className="text-sm text-theme-secondary">
+                  Your Database will automatically backup completely independently into your local directory on a {backupFreq} basis.
+                </p>
+              </div>
+           )}
+
+           <div className="grid gap-2">
+             <label className="text-sm text-theme-secondary">Backup Directory</label>
+             <div className="flex gap-2">
+               <input type="text" readOnly placeholder="Click Select Folder" value={backupDir} className="w-full p-2 rounded border border-theme-primary bg-theme-primary text-theme-secondary focus:outline-none focus:ring" />
+               <Button className="px-3 rounded bg-blue-500 text-white whitespace-nowrap" onClick={handleSelectBackupDir}>Select Folder</Button>
+             </div>
+           </div>
+           
+           <div className="grid gap-2">
+             <label className="text-sm text-theme-secondary">Backup Frequency</label>
+             <select value={backupFreq} onChange={e => setBackupFreq(e.target.value)} className="w-full p-2 rounded border border-theme-primary bg-theme-primary text-theme-secondary focus:outline-none focus:ring">
+                <option value="never">Never (Disabled)</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+             </select>
+           </div>
+           
+           <Button className="px-4 py-2 rounded bg-brand-primary text-white" onClick={handleSetBackupConfig} disabled={settingBackup}>
+              {settingBackup ? 'Saving...' : 'Save Configuration'}
+           </Button>
+        </div>
+      </div>
+
       {/* Import Collections Card */}
       <div className="bg-theme-card border border-theme-primary rounded-lg p-6 space-y-4 mt-6">
         <div className="flex items-center justify-between">
