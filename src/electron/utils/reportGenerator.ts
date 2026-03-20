@@ -291,7 +291,7 @@ export class ReportGenerator {
             const endDate = new Date(year, month, 0, 23, 59, 59, 999);
 
             // Fetch stock data for the party within the month
-            const stocks = await Stock.find({
+            const rawStocks = await Stock.find({
                 party: new mongoose.Types.ObjectId(partyId),
                 $or: [
                     { earliestEntryAt: { $lte: endDate } },
@@ -302,8 +302,23 @@ export class ReportGenerator {
                 .populate('item', 'name category')
                 .populate('unit', 'name rate')
                 .populate('warehouses', 'name')
-                .sort({ 'item.name': 1 })
                 .lean();
+
+            // Perform in-memory sort to correctly sort by the populated `item.name`, then identically by lot number
+            const stocks = (rawStocks as any[]).sort((a: any, b: any) => {
+                const itemA = a.item?.name?.toLowerCase() || '';
+                const itemB = b.item?.name?.toLowerCase() || '';
+                if (itemA < itemB) return -1;
+                if (itemA > itemB) return 1;
+
+                // When items match exactly, group sequentially by lot number
+                const lotA = a.lotNumber?.toLowerCase() || '';
+                const lotB = b.lotNumber?.toLowerCase() || '';
+                if (lotA < lotB) return -1;
+                if (lotA > lotB) return 1;
+                
+                return 0;
+            });
 
             // Get party and company information
             const party = await Party.findById(partyId).lean();

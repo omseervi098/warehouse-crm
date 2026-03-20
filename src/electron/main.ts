@@ -1313,7 +1313,7 @@ function registerIpcHandlers() {
             // Find all chargeable stocks that haven't been calculated in the last 24 hours
             const staleThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-            const refreshFilterQuery = buildFilterQuery(
+            const refreshFilterQuery = await buildFilterQuery(
                 { ...params, page: undefined, limit: undefined },
                 Stock,
                 ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt']
@@ -1388,7 +1388,7 @@ function registerIpcHandlers() {
                 }
             }
             // Calculate aggregation data for all matching records using MongoDB aggregation
-            const filterQuery = buildFilterQuery(
+            const filterQuery = await buildFilterQuery(
                 { ...params, page: undefined, limit: undefined },
                 Stock,
                 ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt']

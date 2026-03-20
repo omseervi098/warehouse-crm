@@ -142,7 +142,7 @@ const TransactionFilters: React.FC<TransactionFiltersProps> = ({
           <TableFilter
             filterQuery={filterQuery}
             setFilterQuery={setFilterQuery}
-            placeholder="Filter by lot, vehicle, D.O. ..."
+            placeholder="Filter by lot, item, vehicle, D.O. ..."
           />
         </div>
         {/* Additional filters can be added here */}

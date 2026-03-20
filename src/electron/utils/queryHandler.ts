@@ -1,4 +1,6 @@
 import mongoose from 'mongoose';
+import Item from '../models/item.js';
+import Party from '../models/party.js';
 
 interface QueryParams {
   page?: string;
@@ -17,7 +19,7 @@ interface QueryHandlerOptions {
 }
 
 
-export const buildFilterQuery = (query: QueryParams, model: any, dateFields: string[] = ['createdAt']) => {
+export const buildFilterQuery = async (query: QueryParams, model: any, dateFields: string[] = ['createdAt']) => {
   const { filters, rangeFilters, search } = query;
 
   const filterFields = filters ? Object.keys(filters) : [];
@@ -108,10 +110,40 @@ export const buildFilterQuery = (query: QueryParams, model: any, dateFields: str
   }
 
   if (search && (search as string).trim()) {
-    const escapedRegex = (search as string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const searchRegex = new RegExp(escapedRegex, 'i');
-    const searchableFields = model.getSearchableFields();
-    filterQuery.$or = searchableFields.map((field: string) => ({ [field]: searchRegex }));
+    const searchTerms = (search as string).trim().split(/\s+/);
+    const regexes = searchTerms.map(term => {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(escaped, 'i');
+    });
+
+    const searchableFields = typeof model.getSearchableFields === 'function' ? model.getSearchableFields() : [];
+    
+    // Each field must match ALL regexes to satisfy the field condition
+    const orConditions: any[] = searchableFields.map((field: string) => ({
+      $and: regexes.map(re => ({ [field]: re }))
+    }));
+    
+    if (model.schema.path('item')) {
+      const itemQuery = { $and: regexes.map(re => ({ name: re })) };
+      const matchingItems = await Item.find(itemQuery).select('_id').lean();
+      if (matchingItems.length > 0) {
+        orConditions.push({ item: { $in: matchingItems.map((i: any) => i._id) } });
+      }
+    }
+    
+    if (model.schema.path('party')) {
+      const partyQuery = { $and: regexes.map(re => ({ name: re })) };
+      const matchingParties = await Party.find(partyQuery).select('_id').lean();
+      if (matchingParties.length > 0) {
+        orConditions.push({ party: { $in: matchingParties.map((p: any) => p._id) } });
+      }
+    }
+    
+    if (orConditions.length > 0) {
+      filterQuery.$or = orConditions;
+    } else {
+      filterQuery.$or = [{ _id: null }];
+    }
   }
 
   return filterQuery;
@@ -135,7 +167,7 @@ export const handleFilteredQuery = async (
     throw new Error('Invalid sort field');
   }
 
-  const filterQuery = buildFilterQuery(query, model, dateFields);
+  const filterQuery = await buildFilterQuery(query, model, dateFields);
 
   const completePipeline = [
     { $match: filterQuery },
