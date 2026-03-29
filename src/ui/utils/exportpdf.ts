@@ -39,7 +39,6 @@ function hexToRgb(hex: string): [number, number, number] {
 async function previewPdf(doc: jsPDF, fileName: string) {
   const dataUri = doc.output('datauristring', { filename: fileName + '.pdf' });
   const result = await window.electron?.window?.pdfPreview?.(dataUri, fileName);
-  console.log("Preview PDF result:", dataUri, fileName, result);
   if (result && !result.ok) {
     alert("Failed to open PDF preview: " + (result.error || "Unknown error"));
   }
@@ -320,9 +319,9 @@ export async function downloadChargeReportPdf(
     values.push
       (String(charge.quantity));
   }
-  if (charge.unit.rate !== undefined) {
+  if ((charge.chargeRate ?? charge.unit.rate) !== undefined) {
     headers.push("Rate");
-    values.push("Rs" + String(charge.unit.rate));
+    values.push("Rs" + String(charge.chargeRate ?? charge.unit.rate));
   }
   if (charge.totalCharge !== undefined) {
     headers.push("Total Amount");

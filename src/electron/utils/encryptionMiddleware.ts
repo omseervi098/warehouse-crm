@@ -182,9 +182,9 @@ export class MongooseEncryptionMiddleware implements EncryptionMiddleware {
      * Encrypts a field value, handling different data types
      * @param value - The value to encrypt
      * @param key - The encryption key
-     * @returns The encrypted value as a JSON string
+     * @returns The encrypted value in a shape compatible with the schema
      */
-    private async encryptFieldValue(value: any, key: Buffer): Promise<string> {
+    private async encryptFieldValue(value: any, key: Buffer): Promise<any> {
         try {
             // Handle null/undefined values
             if (value === null || value === undefined) {
@@ -198,17 +198,17 @@ export class MongooseEncryptionMiddleware implements EncryptionMiddleware {
 
             // Handle arrays
             if (Array.isArray(value)) {
-                const encryptedArray: EncryptedData[] = [];
+                const encryptedArray: Array<string | null | undefined> = [];
                 for (const item of value) {
                     if (item !== null && item !== undefined) {
                         const itemStr = typeof item === 'string' ? item : JSON.stringify(item);
                         const encryptedItem = CryptoService.encrypt(itemStr, key);
-                        encryptedArray.push(encryptedItem);
+                        encryptedArray.push(JSON.stringify(encryptedItem));
                     } else {
                         encryptedArray.push(item);
                     }
                 }
-                return JSON.stringify(encryptedArray);
+                return encryptedArray;
             }
 
             // Handle objects and primitives
@@ -342,6 +342,10 @@ export class MongooseEncryptionMiddleware implements EncryptionMiddleware {
      * @returns True if the value appears to be already encrypted
      */
     private isAlreadyEncrypted(value: any): boolean {
+        if (Array.isArray(value)) {
+            return value.every(item => item == null || (typeof item === 'string' && this.looksLikeEncryptedData(item)));
+        }
+
         if (typeof value !== 'string') {
             return false;
         }

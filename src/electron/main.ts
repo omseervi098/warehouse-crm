@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Tray } from 'electron';
+import { EJSON } from 'bson';
 import dotenv from 'dotenv';
 import keytar from 'keytar';
 import mongoose from 'mongoose';
@@ -629,7 +630,7 @@ function registerIpcHandlers() {
             return { ok: false, error: err.message };
         }
     });
-    // Import collections from a ZIP (JSON or CSV files inside)
+    // Import collections from a ZIP (EJSON, JSON, or CSV files inside)
     ipcMain.handle('db:importCollections', async (_e) => {
         try {
             const ok = await initMongo();
@@ -654,15 +655,24 @@ function registerIpcHandlers() {
             for (const entry of entries) {
                 if (entry.isDirectory) continue;
                 const base = path.basename(entry.entryName);
-                const ext = base.toLowerCase().endsWith('.json') ? 'json' : base.toLowerCase().endsWith('.csv') ? 'csv' : '';
+                const ext = base.toLowerCase().endsWith('.ejson')
+                    ? 'ejson'
+                    : base.toLowerCase().endsWith('.json')
+                        ? 'json'
+                        : base.toLowerCase().endsWith('.csv')
+                            ? 'csv'
+                            : '';
                 if (!ext) continue; // unsupported
-                const name = base.replace(/\.(json|csv)$/i, '');
+                const name = base.replace(/\.(ejson|json|csv)$/i, '');
                 if (!name || name.startsWith('system.')) { summary.skipped.push({ name: base, reason: 'Invalid or system collection' }); continue; }
 
                 try {
                     const content = entry.getData().toString('utf8');
                     let docs: any[] = [];
-                    if (ext === 'json') {
+                    if (ext === 'ejson') {
+                        try { docs = EJSON.parse(content, { relaxed: false }); } catch { throw new Error('Invalid EJSON'); }
+                        if (!Array.isArray(docs)) { throw new Error('EJSON must be an array of documents'); }
+                    } else if (ext === 'json') {
                         try { docs = JSON.parse(content); } catch (e: any) { throw new Error('Invalid JSON'); }
                         if (!Array.isArray(docs)) { throw new Error('JSON must be an array of documents'); }
                     } else {
@@ -672,37 +682,38 @@ function registerIpcHandlers() {
                         }
                         docs = (parsed.data as any[]) || [];
                     }
-                    // Best-effort fixups: convert _id to ObjectId and date-like strings to Date
-                    const toObjectIdMaybe = (v: any) => {
-                        if (typeof v === 'string' && /^[a-fA-F0-9]{24}$/.test(v)) {
-                            try { return new (mongoose as any).Types.ObjectId(v); } catch { return v; }
-                        }
-                        return v;
-                    };
-                    const isIsoDateString = (s: string) => /^(\d{4}-\d{2}-\d{2})([Tt ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?)?([Zz]|[+\-]\d{2}:?\d{2})?$/.test(s);
-                    const fixDates = (obj: any): any => {
-                        if (obj == null) return obj;
-                        if (typeof obj === 'string') {
-                            return isIsoDateString(obj) ? new Date(obj) : obj;
-                        }
-                        if (Array.isArray(obj)) return obj.map(fixDates);
-                        if (typeof obj === 'object') {
-                            const out: any = {};
-                            for (const [k, v] of Object.entries(obj)) {
-                                if (k === '_id') { out[k] = toObjectIdMaybe(v); continue; }
-                                // Heuristic: keys commonly indicating dates or ISO strings
-                                if (typeof v === 'string' && (/(date|at)$/i.test(k) || isIsoDateString(v))) {
-                                    const d = new Date(v);
-                                    out[k] = isNaN(d.getTime()) ? v : d;
-                                } else {
-                                    out[k] = fixDates(v);
-                                }
+                    if (ext !== 'ejson') {
+                        // Legacy JSON/CSV imports need best-effort coercion of IDs and dates.
+                        const toObjectIdMaybe = (v: any) => {
+                            if (typeof v === 'string' && /^[a-fA-F0-9]{24}$/.test(v)) {
+                                try { return new (mongoose as any).Types.ObjectId(v); } catch { return v; }
                             }
-                            return out;
-                        }
-                        return obj;
-                    };
-                    docs = docs.map((d: any) => fixDates(d));
+                            return v;
+                        };
+                        const isIsoDateString = (s: string) => /^(\d{4}-\d{2}-\d{2})([Tt ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?)?([Zz]|[+\-]\d{2}:?\d{2})?$/.test(s);
+                        const fixDates = (obj: any): any => {
+                            if (obj == null) return obj;
+                            if (typeof obj === 'string') {
+                                return isIsoDateString(obj) ? new Date(obj) : obj;
+                            }
+                            if (Array.isArray(obj)) return obj.map(fixDates);
+                            if (typeof obj === 'object') {
+                                const out: any = {};
+                                for (const [k, v] of Object.entries(obj)) {
+                                    if (k === '_id') { out[k] = toObjectIdMaybe(v); continue; }
+                                    if (typeof v === 'string' && (/(date|at)$/i.test(k) || isIsoDateString(v))) {
+                                        const d = new Date(v);
+                                        out[k] = isNaN(d.getTime()) ? v : d;
+                                    } else {
+                                        out[k] = fixDates(v);
+                                    }
+                                }
+                                return out;
+                            }
+                            return obj;
+                        };
+                        docs = docs.map((d: any) => fixDates(d));
+                    }
 
                     const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
                     if (Model && Model.schema) {
@@ -713,9 +724,17 @@ function registerIpcHandlers() {
                     }
 
                     if (!docs || docs.length === 0) { summary.skipped.push({ name, reason: 'No documents' }); continue; }
-                    const coll = db.collection(name);
-                    const res = await coll.insertMany(docs, { ordered: false });
-                    const count = (res && (res as any).insertedCount) || docs.length;
+                    let count = docs.length;
+                    if (Model) {
+                        // Insert through Mongoose so array-typed encrypted fields keep
+                        // the same persisted shape as normal application writes.
+                        const insertedDocs = await (Model as any).insertMany(docs, { ordered: false });
+                        count = Array.isArray(insertedDocs) ? insertedDocs.length : docs.length;
+                    } else {
+                        const coll = db.collection(name);
+                        const res = await coll.insertMany(docs, { ordered: false });
+                        count = (res && (res as any).insertedCount) || docs.length;
+                    }
                     summary.imported.push({ name, count });
                 } catch (e: any) {
                     summary.failed.push({ name, error: e?.message || String(e) });
@@ -728,14 +747,14 @@ function registerIpcHandlers() {
         }
     });
 
-    // Export selected collections to a ZIP (JSON or CSV)
-    ipcMain.handle('db:exportCollections', async (_e, args: { names: string[]; format: 'json' | 'csv' }) => {
+    // Export selected collections to a ZIP (EJSON, JSON, or CSV)
+    ipcMain.handle('db:exportCollections', async (_e, args: { names: string[]; format: 'ejson' | 'json' | 'csv' }) => {
         try {
             const ok = await initMongo();
             if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
             validateEventFrame(_e.senderFrame);
             const names = Array.isArray(args?.names) ? args.names.filter(n => typeof n === 'string' && !n.startsWith('system.') && n.trim() !== '') : [];
-            const format = (args?.format === 'csv' ? 'csv' : 'json') as 'json' | 'csv';
+            const format = (args?.format === 'csv' || args?.format === 'json' || args?.format === 'ejson' ? args.format : 'ejson') as 'ejson' | 'json' | 'csv';
             if (names.length === 0) return { ok: false, error: 'No collections provided' };
             const db = mongoose.connection.db;
             if (!db) return { ok: false, error: 'Database not initialized' };
@@ -757,7 +776,10 @@ function registerIpcHandlers() {
                 
                 let content = '';
                 let fileName = '';
-                if (format === 'json') {
+                if (format === 'ejson') {
+                    content = EJSON.stringify(docs, undefined, 2, { relaxed: false });
+                    fileName = `${name}.ejson`;
+                } else if (format === 'json') {
                     content = JSON.stringify(docs, null, 2);
                     fileName = `${name}.json`;
                 } else {
@@ -815,8 +837,8 @@ function registerIpcHandlers() {
                          await middleware.decryptFields(doc, Model.schema);
                     }
                 }
-                const content = JSON.stringify(docs, null, 2);
-                zip.addFile(`${name}.json`, Buffer.from(content, 'utf8'));
+                const content = EJSON.stringify(docs, undefined, 2, { relaxed: false });
+                zip.addFile(`${name}.ejson`, Buffer.from(content, 'utf8'));
             }
             const stamp = new Date().toISOString().replace(/[:.]/g, '-');
             const finalPath = path.join(dirPath, `autobackup_${stamp}.zip`);
@@ -883,9 +905,7 @@ function registerIpcHandlers() {
                     if (config.frequency === 'weekly') expr = '0 0 * * 0'; // Sundays
                     else if (config.frequency === 'monthly') expr = '0 0 1 * *'; // 1st of month
 
-                    console.log(`[Cron] Initializing Local Autobackup: ${config.frequency} (${expr})`);
                     activeCronTask = cron.schedule(expr, async () => {
-                        console.log('[Cron] Running scheduled backup...');
                         await generateBackupZipPath(config.directory);
                     });
                 }
@@ -1318,7 +1338,7 @@ function registerIpcHandlers() {
                 { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
                 { $unwind: '$unit' },
                 { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
-                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, isNil: 1, chargeable: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: 1, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
+                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, isNil: 1, chargeable: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, chargeRate: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: 1, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
             ];
             const { results: stocks, page, limit, total } = await handleFilteredQuery(params || {}, { model: Stock, pipeline, dateFields: ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt'] });
 
@@ -1378,6 +1398,35 @@ function registerIpcHandlers() {
         }
     });
 
+    ipcMain.handle('stocks:migrateChargeRates', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const stocks = await Stock.find({
+                $or: [
+                    { chargeRate: { $exists: false } },
+                    { chargeRate: null }
+                ]
+            }).select('_id unit').lean();
+
+            let updatedCount = 0;
+
+            for (const stock of stocks) {
+                const unit = await Unit.findById(stock.unit).select('rate').lean<{ rate?: number }>();
+                if (typeof unit?.rate !== 'number') continue;
+
+                await Stock.updateOne(
+                    { _id: stock._id },
+                    { $set: { chargeRate: unit.rate } }
+                );
+                updatedCount += 1;
+            }
+
+            return { ok: true, data: { updatedCount } };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
     ipcMain.handle('stocks:getById', async (_e, id: string) => {
         try {
             await initMongo();
@@ -1393,7 +1442,7 @@ function registerIpcHandlers() {
                 { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
                 { $lookup: { from: 'transactions', localField: 'lotNumber', foreignField: 'lotNumber', as: 'transactions' } },
                 { $addFields: { transactions: { $sortArray: { input: '$transactions', sortBy: { enteredAt: 1 } } } } },
-                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, chargeable: 1, isNil: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { enteredAt: 1, type: 1, quantity: 1, shortage: 1, extra: 1, remark: 1, doNumber: 1, vehicleNumber: 1 }, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
+                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, chargeable: 1, isNil: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, chargeRate: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { enteredAt: 1, type: 1, quantity: 1, shortage: 1, extra: 1, remark: 1, doNumber: 1, vehicleNumber: 1 }, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
             ];
             const stock = await Stock.aggregate(pipeline);
             if (stock.length === 0) return { ok: false, error: 'Stock not found' };
@@ -1426,7 +1475,7 @@ function registerIpcHandlers() {
                 { $unwind: '$unit' },
                 { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
                 { $lookup: { from: 'transactions', localField: 'transactions', foreignField: '_id', as: 'transactions' } },
-                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
+                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, chargeRate: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
             ];
             // Ensure data consistency by refreshing stale charges before querying
             // Find all chargeable stocks that haven't been calculated in the last 24 hours
@@ -1574,7 +1623,7 @@ function registerIpcHandlers() {
                 { $unwind: '$unit' },
                 { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
                 { $lookup: { from: 'transactions', localField: 'transactions', foreignField: '_id', as: 'transactions' } },
-                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
+                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, chargeRate: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
             ];
             const { results } = await handleFilteredQuery({}, { model: Stock, pipeline, dateFields: ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt'] });
             if (!results || results.length === 0) return { ok: false, error: 'Stock not found' };

@@ -140,7 +140,6 @@ export class ChargeValidationService {
             startTime: new Date()
         };
 
-        console.log(`Starting validation for ${lotNumbers.length} lots...`);
 
         try {
             for (let i = 0; i < lotNumbers.length; i++) {
@@ -154,13 +153,11 @@ export class ChargeValidationService {
                         summary.valid++;
                     } else {
                         summary.invalid++;
-                        console.log(`Validation failed for lot ${lotNumber}:`, result.errors);
                     }
 
                     // Progress reporting
                     if ((i + 1) % this.VALIDATION_BATCH_SIZE === 0) {
                         const percentage = ((i + 1) / lotNumbers.length * 100).toFixed(1);
-                        console.log(`Validation progress: ${i + 1}/${lotNumbers.length} (${percentage}%)`);
                     }
 
                 } catch (error) {
@@ -177,8 +174,6 @@ export class ChargeValidationService {
             summary.endTime = new Date();
             summary.duration = summary.endTime.getTime() - summary.startTime.getTime();
 
-            console.log(`Validation completed in ${summary.duration}ms`);
-            console.log(`Valid: ${summary.valid}, Invalid: ${summary.invalid}, Percentage: ${summary.validationPercentage.toFixed(1)}%`);
 
         } catch (error) {
             summary.endTime = new Date();
@@ -208,7 +203,6 @@ export class ChargeValidationService {
      */
     static async checkDataConsistency(): Promise<ConsistencyCheckResult> {
         try {
-            console.log('Checking data consistency between Stock and Charge collections...');
 
             // Get all lot numbers from stock collection
             const stockLots = await Stock.distinct('lotNumber');
@@ -229,11 +223,6 @@ export class ChargeValidationService {
                 chargeableWithoutCharges
             };
 
-            console.log('Data consistency check results:');
-            console.log(`- Chargeable stocks without charges: ${stockWithoutCharges.length}`);
-            console.log(`- Charges without stock records: ${chargesWithoutStock.length}`);
-            console.log(`- Non-chargeable stocks with charges: ${nonChargeableWithCharges.length}`);
-            console.log(`- Chargeable stocks without charges: ${chargeableWithoutCharges.length}`);
 
             return result;
 
@@ -255,26 +244,22 @@ export class ChargeValidationService {
         };
 
         try {
-            console.log('Starting charge data cleanup...');
 
             // Check data consistency first
             const consistency = await this.checkDataConsistency();
 
             // Remove orphaned charges (charges without stock records)
             if (consistency.chargesWithoutStock.length > 0) {
-                console.log(`Removing ${consistency.chargesWithoutStock.length} orphaned charge records...`);
 
                 // Since charges are now part of stock, orphaned charges shouldn't exist
                 // This section is kept for compatibility but should not find any records
                 const orphanedResult = { deletedCount: 0 };
 
                 result.orphanedChargesRemoved = orphanedResult.deletedCount || 0;
-                console.log(`Removed ${result.orphanedChargesRemoved} orphaned charge records`);
             }
 
             // Remove charges for non-chargeable lots
             if (consistency.nonChargeableWithCharges.length > 0) {
-                console.log(`Removing ${consistency.nonChargeableWithCharges.length} charges for non-chargeable lots...`);
 
                 const invalidResult = await Stock.updateMany(
                     {
@@ -295,12 +280,10 @@ export class ChargeValidationService {
                 );
 
                 result.invalidChargesRemoved = invalidResult.deletedCount || 0;
-                console.log(`Removed ${result.invalidChargesRemoved} invalid charge records`);
             }
 
             // Fix inconsistent charges by recalculating
             if (consistency.chargeableWithoutCharges.length > 0) {
-                console.log(`Creating missing charges for ${consistency.chargeableWithoutCharges.length} chargeable lots...`);
 
                 for (const lotNumber of consistency.chargeableWithoutCharges) {
                     try {
@@ -314,11 +297,8 @@ export class ChargeValidationService {
                     }
                 }
 
-                console.log(`Fixed ${result.inconsistentChargesFixed} inconsistent charge records`);
             }
 
-            console.log('Charge data cleanup completed');
-            console.log(`Summary: Orphaned removed: ${result.orphanedChargesRemoved}, Invalid removed: ${result.invalidChargesRemoved}, Fixed: ${result.inconsistentChargesFixed}, Errors: ${result.errors.length}`);
 
         } catch (error) {
             console.error('Error during charge data cleanup:', error);
@@ -343,13 +323,11 @@ export class ChargeValidationService {
             errors: [] as Array<{ lotNumber: string; error: string }>
         };
 
-        console.log(`Attempting to fix ${invalidResults.length} invalid charge records...`);
 
         for (const result of invalidResults) {
             try {
                 await ChargeService.calculateAndStore(result.lotNumber);
                 fixResult.fixed++;
-                console.log(`Fixed charge record for lot: ${result.lotNumber}`);
             } catch (error) {
                 fixResult.failed++;
                 fixResult.errors.push({
@@ -360,7 +338,6 @@ export class ChargeValidationService {
             }
         }
 
-        console.log(`Fix completed: Fixed: ${fixResult.fixed}, Failed: ${fixResult.failed}`);
         return fixResult;
     }
 

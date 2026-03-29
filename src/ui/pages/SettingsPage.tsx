@@ -19,7 +19,7 @@ const SettingsPage: React.FC = () => {
   const [dropping, setDropping] = useState(false);
   // Export Collections state
   const [exporting, setExporting] = useState(false);
-  const [exportFormat, setExportFormat] = useState<'json' | 'csv'>('json');
+  const [exportFormat, setExportFormat] = useState<'ejson' | 'json' | 'csv'>('ejson');
   // Import Collections state
   const [importing, setImporting] = useState(false);
 
@@ -1384,7 +1384,7 @@ const SettingsPage: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-medium">Import Collections</h2>
-            <p className="text-sm text-theme-secondary">Import collections from a ZIP created by this app (JSON/CSV files inside). Files must be named like collectionName.json or collectionName.csv.</p>
+            <p className="text-sm text-theme-secondary">Import collections from a ZIP created by this app. Lossless exports use `.ejson`; legacy `.json` and `.csv` files are also supported.</p>
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={handleImportCollections} disabled={importing} >
@@ -1399,14 +1399,15 @@ const SettingsPage: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-medium">Export Collections</h2>
-            <p className="text-sm text-theme-secondary">Export selected collections to a ZIP archive as JSON or CSV files.</p>
+            <p className="text-sm text-theme-secondary">Export selected collections to a ZIP archive. Use `EJSON` to preserve Mongo `ObjectId` and `Date` values, or `CSV` for spreadsheet-friendly data.</p>
           </div>
           <div className="flex items-center gap-2">
             <select
               value={exportFormat}
-              onChange={e => setExportFormat((e.target.value as 'json' | 'csv'))}
+              onChange={e => setExportFormat((e.target.value as 'ejson' | 'json' | 'csv'))}
               className="p-2 rounded border border-theme-primary bg-theme-primary text-theme-secondary"
             >
+              <option value="ejson">EJSON (Preserve IDs/Dates)</option>
               <option value="json">JSON</option>
               <option value="csv">CSV</option>
             </select>

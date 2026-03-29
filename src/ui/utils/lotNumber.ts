@@ -23,15 +23,32 @@ export const getFinancialYearString = (date: string | Date): string => {
     return `${year.toString().slice(-2)}-${nextYear.toString().slice(-2)}`;
 }
 
+export const getFinancialYearOptions = (date: string | Date, yearsBefore: number = 2, yearsAfter: number = 2): string[] => {
+    const dt = date instanceof Date ? date : new Date(date);
+    let baseYear = dt.getFullYear();
+    if (dt.getMonth() + 1 < 4) {
+        baseYear -= 1;
+    }
+
+    const years: string[] = [];
+    for (let year = baseYear - yearsBefore; year <= baseYear + yearsAfter; year += 1) {
+        const nextYear = year + 1;
+        years.push(`${year.toString().slice(-2)}-${nextYear.toString().slice(-2)}`);
+    }
+
+    return years;
+};
+
 export const constructLotNumber = (
     partyName: string,
     itemName: string,
     date: string,
     userInputLot: string,
+    financialYearOverride?: string,
 ): string => {
     const partyAbbr = generateAbbreviation(partyName, 3);
     const itemAbbr = generateAbbreviation(itemName, 4, true);
-    const financialYear = getFinancialYearString(date);
+    const financialYear = financialYearOverride || getFinancialYearString(date);
     const cleanUserInput = userInputLot || '';
     return `${partyAbbr}|${financialYear}|${itemAbbr}|${cleanUserInput}`;
 };

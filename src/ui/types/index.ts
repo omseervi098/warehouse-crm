@@ -135,6 +135,7 @@ export interface StockBalance {
   party: Pick<Party, '_id' | 'name'>;
   warehouses: Pick<GalaLocation, '_id' | 'name'>[]
   quantity: number;
+  chargeRate?: number;
   unit: Pick<PackagingUnit, '_id' | 'name' | 'rate'>
   earliestEntryAt: string;
   latestEntryAt: string;
@@ -316,6 +317,7 @@ export interface Charge {
   item: Pick<Item, '_id' | 'name' | 'category'>;
   lotNumber: string;
   unit: Pick<PackagingUnit, '_id' | 'name' | 'rate'>;
+  chargeRate?: number;
   quantity: number;
   shortage: number;
   extra: number;
@@ -593,7 +595,7 @@ declare global {
       db: {
         listCollections: () => Promise<{ ok: boolean; data?: string[]; error?: string }>;
         dropCollections: (names: string[]) => Promise<{ ok: boolean; data?: { dropped: string[]; failed: { name: string; error: string }[] }; error?: string }>;
-        exportCollections: (names: string[], format: 'json' | 'csv') => Promise<{ ok: boolean; data?: { savedTo: string }; error?: string }>;
+        exportCollections: (names: string[], format: 'ejson' | 'json' | 'csv') => Promise<{ ok: boolean; data?: { savedTo: string }; error?: string }>;
         importCollections: () => Promise<{ ok: boolean; data?: { imported: { name: string; count: number }[]; skipped: { name: string; reason: string }[]; failed: { name: string; error: string }[] }; error?: string }>;
       };
     };

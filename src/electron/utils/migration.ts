@@ -30,11 +30,9 @@ export async function migrateExistingCharges(): Promise<MigrationResult> {
     };
 
     try {
-        console.log('Starting migration of existing charges...');
 
         // Get all chargeable stock records
         const chargeableStocks = await Stock.find({ chargeable: true }).lean();
-        console.log(`Found ${chargeableStocks.length} chargeable lots to migrate`);
 
         // Process each stock record
         for (const stock of chargeableStocks) {
@@ -43,13 +41,11 @@ export async function migrateExistingCharges(): Promise<MigrationResult> {
             try {
                 // Check if charge data already exists in stock record
                 if (stock.chargeCalculated) {
-                    console.log(`Charge data already exists for lot: ${stock.lotNumber}, skipping`);
                     result.skipped++;
                     continue;
                 }
 
                 // Calculate charges using existing logic
-                console.log(`Calculating charges for lot: ${stock.lotNumber}`);
                 const chargeData = await computeChargesForLot(stock, false);
 
                 // Prepare charge record data
@@ -89,7 +85,6 @@ export async function migrateExistingCharges(): Promise<MigrationResult> {
                         }
                     }
                 );
-                console.log(`Successfully migrated charges for lot: ${stock.lotNumber}`);
                 result.successful++;
 
             } catch (error) {
@@ -104,14 +99,6 @@ export async function migrateExistingCharges(): Promise<MigrationResult> {
         }
 
         result.duration = Date.now() - startTime;
-
-        console.log('Migration completed:', {
-            totalProcessed: result.totalProcessed,
-            successful: result.successful,
-            failed: result.failed,
-            skipped: result.skipped,
-            duration: `${result.duration}ms`
-        });
 
         return result;
 
@@ -134,7 +121,6 @@ export async function validateMigratedCharges(sampleSize: number = 10): Promise<
         difference: number;
     }>;
 }> {
-    console.log(`Validating migrated charges (sample size: ${sampleSize})...`);
 
     const chargeRecords = await Stock.find({ chargeCalculated: true }).limit(sampleSize).lean();
     const mismatches: Array<{
@@ -177,7 +163,6 @@ export async function validateMigratedCharges(sampleSize: number = 10): Promise<
         }
     }
 
-    console.log(`Validation completed: ${chargeRecords.length} records validated, ${mismatches.length} mismatches found`);
 
     return {
         validated: chargeRecords.length,
@@ -189,32 +174,26 @@ export async function validateMigratedCharges(sampleSize: number = 10): Promise<
  * Clean up orphaned charge records (charges for lots that no longer exist)
  */
 export async function cleanupOrphanedCharges(): Promise<number> {
-    console.log('Cleaning up orphaned charge records...');
 
     try {
         // Get all lot numbers with charge data
         const chargeLots = await Stock.distinct('lotNumber', { chargeCalculated: true });
-        console.log(`Found ${chargeLots.length} lots with charge data`);
 
         // Get all lot numbers from stock
         const stockLots = await Stock.distinct('lotNumber');
-        console.log(`Found ${stockLots.length} lots in Stock collection`);
 
         // Find orphaned lot numbers
         const orphanedLots = chargeLots.filter((lot: string) => !stockLots.includes(lot));
 
         if (orphanedLots.length > 0) {
-            console.log(`Found ${orphanedLots.length} orphaned charge records, cleaning up...`);
 
             // Since charges are now part of stock records, we don't need to delete separate records
             // This cleanup is no longer needed but kept for compatibility
             const result = { deletedCount: 0 };
 
-            console.log(`Cleaned up ${result.deletedCount} orphaned charge records`);
             return result.deletedCount || 0;
         }
 
-        console.log('No orphaned charge records found');
         return 0;
 
     } catch (error) {

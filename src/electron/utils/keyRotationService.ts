@@ -175,7 +175,6 @@ export class KeyRotationService {
      */
     async rollbackMigration(): Promise<void> {
         try {
-            console.log(`Rolling back ${this.rollbackData.length} records...`);
 
             for (const rollback of this.rollbackData) {
                 try {
@@ -191,7 +190,6 @@ export class KeyRotationService {
 
             // Clear rollback data
             this.rollbackData = [];
-            console.log('Rollback completed');
         } catch (error) {
             throw new Error(`Rollback failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
@@ -417,7 +415,7 @@ export class KeyRotationService {
      * @param key - The encryption key
      * @returns The encrypted value as a JSON string
      */
-    private async encryptFieldValue(value: any, key: Buffer): Promise<string> {
+    private async encryptFieldValue(value: any, key: Buffer): Promise<any> {
         try {
             if (value === null || value === undefined) {
                 return value;
@@ -425,17 +423,17 @@ export class KeyRotationService {
 
             // Handle arrays
             if (Array.isArray(value)) {
-                const encryptedArray: EncryptedData[] = [];
+                const encryptedArray: Array<string | null | undefined> = [];
                 for (const item of value) {
                     if (item !== null && item !== undefined) {
                         const itemStr = typeof item === 'string' ? item : JSON.stringify(item);
                         const encryptedItem = CryptoService.encrypt(itemStr, key);
-                        encryptedArray.push(encryptedItem);
+                        encryptedArray.push(JSON.stringify(encryptedItem));
                     } else {
                         encryptedArray.push(item);
                     }
                 }
-                return JSON.stringify(encryptedArray);
+                return encryptedArray;
             }
 
             // Handle objects and primitives

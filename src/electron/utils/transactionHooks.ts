@@ -7,11 +7,9 @@ import { ChargeService } from './chargeService.js';
  */
 export async function onTransactionChange(lotNumber: string): Promise<void> {
     try {
-        console.log(`Transaction change detected for lot: ${lotNumber}, triggering charge recalculation`);
         const result = await ChargeService.recalculateForLot(lotNumber);
 
         if (result) {
-            console.log(`Charge recalculation completed successfully for lot: ${lotNumber}`);
         } else {
             console.warn(`Charge recalculation returned null for lot: ${lotNumber} (may be non-chargeable or failed)`);
         }
@@ -33,13 +31,11 @@ export async function onTransactionChange(lotNumber: string): Promise<void> {
 export async function onBatchTransactionChange(lotNumbers: string[]): Promise<void> {
     const uniqueLotNumbers = [...new Set(lotNumbers)];
 
-    console.log(`Batch transaction change detected for ${uniqueLotNumbers.length} lots, triggering charge recalculation`);
 
     // Process lots in parallel for better performance
     const promises = uniqueLotNumbers.map(async (lotNumber) => {
         try {
             await ChargeService.recalculateForLot(lotNumber);
-            console.log(`Charge recalculation completed for lot: ${lotNumber}`);
         } catch (error) {
             // Log error but don't throw to avoid blocking other lot calculations
             console.error(`Error recalculating charges for lot ${lotNumber}:`, error);
@@ -47,7 +43,6 @@ export async function onBatchTransactionChange(lotNumbers: string[]): Promise<vo
     });
 
     await Promise.allSettled(promises);
-    console.log(`Batch charge recalculation completed for ${uniqueLotNumbers.length} lots`);
 }
 
 /**
@@ -89,12 +84,9 @@ export function setupTransactionHooks(transactionModel: any): void {
         schema.post('deleteMany', async function () {
             // For bulk operations, we need to get the affected lot numbers before deletion
             // This is handled in the main API handlers where we have more control
-            console.log('Bulk transaction deletion detected, charge recalculation should be handled by API layer');
         });
 
-        console.log('Transaction hooks setup completed');
     } catch (error) {
         console.error('Error setting up transaction hooks:', error);
-        console.log('Transaction hooks will be disabled, charge updates will rely on API-level triggers');
     }
 }

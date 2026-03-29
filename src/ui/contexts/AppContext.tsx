@@ -429,7 +429,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         unitsRes,
         locationsRes
       ] = await Promise.all([
-        companyApi.get().catch(() => (console.log("Company not found"))),
+        companyApi.get().catch(() => undefined),
         partiesApi.getAll(),
         itemsApi.getAll(),
         transactionsApi.getAll({

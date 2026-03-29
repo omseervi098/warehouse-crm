@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Stock from '../models/stock.js';
 import Transaction from '../models/transaction.js';
+import Unit from '../models/unit.js';
 import { ChargeService } from './chargeService.js';
 
 export const recalculateStock = async (lotNumber: string) => {
@@ -38,6 +39,13 @@ export const recalculateStock = async (lotNumber: string) => {
     ].map((id: string) => new mongoose.Types.ObjectId(id));
 
     const firstTransaction = transactions[0];
+    const existingStock = await Stock.findOne({ lotNumber }).select('chargeRate').lean();
+    let chargeRate = existingStock?.chargeRate;
+
+    if (typeof chargeRate !== 'number') {
+      const unit = await Unit.findById(firstTransaction.unit).select('rate').lean<{ rate?: number }>();
+      chargeRate = unit?.rate ?? 0;
+    }
 
     const stockData: any = {
       party: firstTransaction.party,
@@ -51,6 +59,7 @@ export const recalculateStock = async (lotNumber: string) => {
       warehouses,
       earliestEntryAt,
       latestEntryAt,
+      chargeRate,
       transactions: transactions.map((t: any) => t._id),
     };
 

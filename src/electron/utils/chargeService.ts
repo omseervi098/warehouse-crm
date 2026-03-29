@@ -33,6 +33,7 @@ export interface ChargeRecord {
     latestEntryAt: Date;
     isNil: boolean;
     totalCharge: number;
+    chargeRate?: number;
     anchorDate?: Date;
     anniversaryDay?: number;
     firstMonth: {
@@ -121,7 +122,6 @@ export class ChargeService {
 
                 if (attempt < RETRY_CONFIG.maxRetries) {
                     const delay = RETRY_CONFIG.retryDelay * Math.pow(RETRY_CONFIG.backoffMultiplier, attempt - 1);
-                    console.log(`Retrying ${operationName} for lot ${lotNumber} in ${delay}ms...`);
                     await this.sleep(delay);
                 } else {
                     console.error(`${operationName} failed permanently for lot ${lotNumber} after ${RETRY_CONFIG.maxRetries} attempts`);
@@ -137,14 +137,12 @@ export class ChargeService {
      */
     static async fallbackToDynamicCalculation(lotNumber: string): Promise<any> {
         try {
-            console.log(`Falling back to dynamic calculation for lot: ${lotNumber}`);
             const stock = await Stock.findOne({ lotNumber }).lean();
             if (!stock) {
                 throw new Error(`Stock record not found for lot: ${lotNumber}`);
             }
 
             const chargeData = await computeChargesForLot(stock, false);
-            console.log(`Dynamic calculation completed for lot: ${lotNumber}`);
             return chargeData;
         } catch (error) {
             console.error(`Dynamic calculation fallback failed for lot ${lotNumber}:`, error);
@@ -177,7 +175,6 @@ export class ChargeService {
             if (storedCharge) {
                 // Check if the record is stale
                 if (this.isStale(storedCharge)) {
-                    console.log(`Stored charge for lot ${lotNumber} is stale (older than 24h), recalculating...`);
                     // Recalculate and update asynchronously (don't block read if possible, 
                     // but for strict accuracy we might want to wait. 
                     // Given the user wants "automatic update", let's wait for it to ensure fresh data is returned.)
@@ -194,7 +191,6 @@ export class ChargeService {
             }
 
             // If no stored charge, fall back to dynamic calculation
-            console.log(`No stored charge found for lot ${lotNumber}, using dynamic calculation`);
             // Also try to persist this dynamic calculation so next time it's fast
             try {
                 // Fire and forget storage for next time
@@ -246,6 +242,7 @@ export class ChargeService {
             // Prepare charge data to update in Stock record
             const chargeFields = {
                 totalCharge: chargeData.totalCharge,
+                chargeRate: chargeData.chargeRate,
                 anchorDate: chargeData.anchorDate,
                 anniversaryDay: chargeData.anniversaryDay,
                 firstMonth: chargeData.firstMonth,
@@ -493,7 +490,6 @@ export class ChargeService {
                 },
                 { upsert: false }
             );
-            console.log(`Marked charge record for recalculation: ${lotNumber}`);
         } catch (error) {
             console.error(`Error marking charge record for recalculation for lot ${lotNumber}:`, error);
         }
@@ -524,7 +520,6 @@ export class ChargeService {
                 }
             );
 
-            console.log(`Cleaned up charge data for ${result.modifiedCount} non-chargeable lots`);
             return result.modifiedCount || 0;
         } catch (error) {
             console.error('Error cleaning up orphaned charge records:', error);
@@ -552,12 +547,10 @@ export class ChargeService {
         // Validate batch size
         const effectiveBatchSize = Math.min(batchSize, BATCH_CONFIG.maxBatchSize);
 
-        console.log(`Starting batch update for ${lotNumbers.length} lots with batch size ${effectiveBatchSize}`);
 
         // Process lots in batches
         for (let i = 0; i < lotNumbers.length; i += effectiveBatchSize) {
             const batch = lotNumbers.slice(i, i + effectiveBatchSize);
-            console.log(`Processing batch ${Math.floor(i / effectiveBatchSize) + 1}/${Math.ceil(lotNumbers.length / effectiveBatchSize)}`);
 
             // Process batch concurrently but with limited concurrency
             const batchPromises = batch.map(async (lotNumber) => {
@@ -584,7 +577,6 @@ export class ChargeService {
         }
 
         result.duration = Date.now() - startTime;
-        console.log(`Batch update completed: ${result.successful} successful, ${result.failed} failed, ${result.duration}ms`);
 
         return result;
     }
@@ -600,7 +592,6 @@ export class ChargeService {
         const batchSize = options.batchSize || Math.floor(BATCH_CONFIG.defaultBatchSize / 2);
         const delay = options.delayBetweenBatches || BATCH_CONFIG.backgroundProcessingDelay * 2;
 
-        console.log(`Starting background charge updates for ${lotNumbers.length} lots`);
 
         const startTime = Date.now();
         const result: BatchProcessingResult = {
@@ -641,7 +632,6 @@ export class ChargeService {
         }
 
         result.duration = Date.now() - startTime;
-        console.log(`Background update completed: ${result.successful} successful, ${result.failed} failed, ${result.duration}ms`);
 
         return result;
     }

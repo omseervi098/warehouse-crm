@@ -77,7 +77,6 @@ export class EmailService {
                 port: 465
             });
 
-            console.log('Email service configured successfully');
         } catch (error) {
             throw new Error(`Failed to configure email service: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }

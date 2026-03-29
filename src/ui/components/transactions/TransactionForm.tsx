@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppContext } from '../../contexts/AppContext';
 import { useTheme } from '../../hooks/useTheme';
 import { GalaLocation, Item, PackagingUnit, Party, StockTransaction, StockTransactionForm, StockTransactionType } from '../../types';
@@ -38,6 +38,9 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
   const [availableLotNumbers, setAvailableLotNumbers] = useState<Record<string, string[]>>({});
   const [availableDONumbers, setAvailableDONumbers] = useState<string[]>([]);
   const [availableQuantities, setAvailableQuantities] = useState<Record<number, number | undefined>>({});
+  const [lotFinancialYears, setLotFinancialYears] = useState<string[]>([getFinancialYearString(new Date())]);
+  const [selectedFullLotNumbers, setSelectedFullLotNumbers] = useState<Record<number, string>>({});
+  const financialYearRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const initialItemState = useMemo(() => ({
     itemId: '',
@@ -66,11 +69,45 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
   const [newTransaction, setNewTransaction] = useState<StockTransactionForm>(initialFormState);
   const [itemNames, setItemNames] = useState<string[]>(['']);
   const [itemCategories, setItemCategories] = useState<string[]>(['']);
+  const usesLotFinancialYear = newTransaction.type === StockTransactionType.OUTWARD || newTransaction.type === StockTransactionType.RETURN;
+
+  const setLotFinancialYearAt = (index: number, value: string) => {
+    setLotFinancialYears(prev => {
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const normalizeFinancialYear = (value: string) => value.replace(/\s+/g, '').trim();
+  const getDisplayedLotSuffix = (lotNumber: string) => lotNumber.split('|').pop() || '';
+
+  const getLotFinancialYear = (index: number) =>
+    usesLotFinancialYear ? (lotFinancialYears[index] || getFinancialYearString(newTransaction.date)) : getFinancialYearString(newTransaction.date);
+
+  useEffect(() => {
+    Object.entries(financialYearRefs.current).forEach(([indexKey, node]) => {
+      const index = Number(indexKey);
+      if (!node) return;
+      const nextValue = getLotFinancialYear(index);
+      if (node.textContent !== nextValue) {
+        node.textContent = nextValue;
+      }
+    });
+  }, [lotFinancialYears, newTransaction.date, newTransaction.type]);
+
   useEffect(() => {
     if (isOpen) {
       if (transactionToEdit) {
         const lotNumberParts = transactionToEdit.lotNumber.split('|');
         const userInputLotNumber = lotNumberParts.pop() || '';
+        const existingFinancialYear = lotNumberParts[1] || getFinancialYearString(transactionToEdit.enteredAt);
+        const isLotBasedType = transactionToEdit.type === StockTransactionType.OUTWARD || transactionToEdit.type === StockTransactionType.RETURN;
+        if (isLotBasedType) {
+          setSelectedFullLotNumbers({ 0: transactionToEdit.lotNumber });
+        } else {
+          setSelectedFullLotNumbers({});
+        }
         setNewTransaction({
           type: transactionToEdit.type,
           partyId: transactionToEdit.party._id,
@@ -81,7 +118,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
           charge: transactionToEdit.charge,
           items: [{
             itemId: transactionToEdit.item._id,
-            lotNumber: userInputLotNumber,
+            lotNumber: isLotBasedType ? transactionToEdit.lotNumber : userInputLotNumber,
             quantity: transactionToEdit.quantity + (transactionToEdit.shortage || 0) - (transactionToEdit.extra || 0),
             shortage: transactionToEdit.shortage,
             unitId: transactionToEdit.unit._id,
@@ -94,12 +131,15 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
         });
         setItemNames([transactionToEdit.item.name]);
         setItemCategories([transactionToEdit.item.category]);
+        setLotFinancialYears([existingFinancialYear]);
       } else {
         setNewTransaction(initialFormState);
         //generate new batch id every time 
         setNewTransaction(prev => ({ ...prev, batchId: crypto.randomUUID() }));
         setItemNames(['']);
         setItemCategories(['']);
+        setLotFinancialYears([getFinancialYearString(initialFormState.date)]);
+        setSelectedFullLotNumbers({});
       }
     }
   }, [isOpen, transactionToEdit, initialFormState, items]);
@@ -148,7 +188,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     itemNames.forEach((itemName, index) => {
       const partyName = parties.find(p => p._id === newTransaction.partyId)?.name;
       if (!partyName) return;
-      const year = getFinancialYearString(newTransaction.date);
+      const year = getLotFinancialYear(index);
       const partyAbbr = generateAbbreviation(partyName, 3);
       const itemAbbr = generateAbbreviation(itemName, 4, true);
       const searchLotNumber = `${partyAbbr}|${year}|${itemAbbr}`;
@@ -158,7 +198,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     });
 
     setAvailableLotNumbers(newAvailableLotNumbers);
-  }, [itemNames, newTransaction.partyId, getLotNumbers]);
+  }, [itemNames, newTransaction.partyId, newTransaction.date, lotFinancialYears, getLotNumbers]);
 
   useEffect(() => {
     if (newTransaction.type === StockTransactionType.OUTWARD || newTransaction.type === StockTransactionType.RETURN) {
@@ -177,11 +217,18 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     let fullLotNumber = '';
     if (value.split('|').length >= 4) {
       fullLotNumber = value;
+      setLotFinancialYearAt(index, value.split('|')[1] || getLotFinancialYear(index));
+      setSelectedFullLotNumbers(prev => ({ ...prev, [index]: fullLotNumber }));
       const stock = await getStockDetails(fullLotNumber);
       if (!stock || !stock.warehouses || stock.warehouses.length === 0 || !stock.unit || !stock.unit._id) {
         setAvailableQuantities(prev => ({ ...prev, [index]: undefined }));
         handleItemChange(index, 'unitId', '');
         handleItemChange(index, 'warehouses', []);
+        setSelectedFullLotNumbers(prev => {
+          const next = { ...prev };
+          delete next[index];
+          return next;
+        });
         return;
       }
       const warehouseIds = stock.warehouses.map((w: any) => w._id || w);
@@ -190,15 +237,27 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       if (typeof stock.quantity !== 'undefined') {
         setAvailableQuantities(prev => ({ ...prev, [index]: stock.quantity }));
       }
+      handleItemChange(index, 'lotNumber', userInput);
+      return;
     } else {
       if (!userInput) {
         setAvailableQuantities(prev => ({ ...prev, [index]: undefined }));
         handleItemChange(index, 'unitId', '');
         handleItemChange(index, 'warehouses', []);
         handleItemChange(index, 'lotNumber', '');
+        setSelectedFullLotNumbers(prev => {
+          const next = { ...prev };
+          delete next[index];
+          return next;
+        });
         return;
       }
     }
+    setSelectedFullLotNumbers(prev => {
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
     handleItemChange(index, 'lotNumber', userInput);
 
   };
@@ -234,7 +293,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       if (newTransaction.partyId) {
         const partyName = parties.find(p => p._id === newTransaction.partyId)?.name;
         const partyAbbr = generateAbbreviation(partyName || '', 3);
-        const year = getFinancialYearString(newTransaction.date);
+        const year = getLotFinancialYear(index);
 
         const itemAbbr = generateAbbreviation(name, 4, true);
         const searchLotNumber = `${partyAbbr}|${year}|${itemAbbr}`;
@@ -267,6 +326,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     setNewTransaction(prev => ({ ...prev, items: [...prev.items, initialItemState] }));
     setItemNames(prev => [...prev, '']);
     setItemCategories(prev => [...prev, '']);
+    setLotFinancialYears(prev => [...prev, getFinancialYearString(newTransaction.date)]);
   };
 
   const removeItemRow = (index: number) => {
@@ -274,6 +334,16 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
     setNewTransaction(prev => ({ ...prev, items: prev.items.filter((_, i) => i !== index) }));
     setItemNames(prev => prev.filter((_, i) => i !== index));
     setItemCategories(prev => prev.filter((_, i) => i !== index));
+    setLotFinancialYears(prev => prev.filter((_, i) => i !== index));
+    setSelectedFullLotNumbers(prev => {
+      const next: Record<number, string> = {};
+      Object.entries(prev).forEach(([key, fullLotNumber]) => {
+        const currentIndex = Number(key);
+        if (currentIndex < index) next[currentIndex] = fullLotNumber;
+        if (currentIndex > index) next[currentIndex - 1] = fullLotNumber;
+      });
+      return next;
+    });
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -320,12 +390,18 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
       }
 
       if (currentItem.itemId && currentItem.quantity > 0 && itemInfo) {
-        currentItem.lotNumber = constructLotNumber(
-          partyName || '',
-          itemInfo.name,
-          newTransaction.date,
-          currentItem.lotNumber // This is user input
-        );
+        const selectedFinancialYear = getLotFinancialYear(index);
+        const selectedFullLotNumber = selectedFullLotNumbers[index];
+
+        currentItem.lotNumber = usesLotFinancialYear && selectedFullLotNumber
+          ? selectedFullLotNumber
+          : constructLotNumber(
+            partyName || '',
+            itemInfo.name,
+            newTransaction.date,
+            currentItem.lotNumber,
+            usesLotFinancialYear ? selectedFinancialYear : undefined
+          );
         return currentItem;
       }
       return null;
@@ -441,8 +517,33 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
                       <div className={`w-10 h-10 border ${theme.border.primary} rounded-md text-sm text-center flex items-center justify-center`} contentEditable={false}>
                         {generateAbbreviation(parties.find(p => p._id === newTransaction.partyId)?.name || '', 3) || ''}
                       </div>
-                      <div className={`w-12 h-10 border ${theme.border.primary} rounded-md text-sm text-center flex items-center justify-center`} contentEditable={true} suppressContentEditableWarning={true}>
-                        {getFinancialYearString(newTransaction.date) || ''}
+                      <div className={`w-12 h-10 border ${theme.border.primary} rounded-md text-sm text-center flex items-center justify-center`}>
+                        {usesLotFinancialYear ? (
+                          <div
+                            ref={(node) => {
+                              financialYearRefs.current[index] = node;
+                            }}
+                            contentEditable
+                            suppressContentEditableWarning
+                            onBlur={(e) => {
+                              const value = normalizeFinancialYear(e.currentTarget.textContent || '');
+                              const nextValue = value || getFinancialYearString(newTransaction.date);
+                              e.currentTarget.textContent = nextValue;
+                              setLotFinancialYearAt(index, nextValue);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            className={`w-full h-full bg-transparent text-center outline-none leading-10 ${theme.text.primary}`}
+                          >
+                            {getLotFinancialYear(index)}
+                          </div>
+                        ) : (
+                          getFinancialYearString(newTransaction.date) || ''
+                        )}
                       </div>
                       <div className={`w-12 h-10 border ${theme.border.primary} rounded-md text-sm text-center py-2 flex items-center justify-center`} contentEditable={false}>
                         {generateAbbreviation(itemNames[index], 4, true).replace(/-/g, '').slice(0, 3) || ''}

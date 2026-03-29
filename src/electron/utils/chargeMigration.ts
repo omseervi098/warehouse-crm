@@ -38,7 +38,6 @@ export class ChargeMigrationService {
             onError
         } = options;
 
-        console.log('Starting charge data migration...');
 
         const progress: MigrationProgress = {
             total: 0,
@@ -54,12 +53,10 @@ export class ChargeMigrationService {
             const totalCount = await Stock.countDocuments({ chargeable: true });
             progress.total = totalCount;
 
-            console.log(`Found ${totalCount} chargeable lots to migrate`);
 
             if (totalCount === 0) {
                 progress.endTime = new Date();
                 progress.duration = progress.endTime.getTime() - progress.startTime.getTime();
-                console.log('No chargeable lots found to migrate');
                 return progress;
             }
 
@@ -75,7 +72,6 @@ export class ChargeMigrationService {
                     try {
                         // Check if charge data already exists in stock record
                         if (skipExisting && stock.chargeCalculated) {
-                            console.log(`Skipping existing charge data for lot: ${stock.lotNumber}`);
                             progress.processed++;
                             progress.successful++;
                             continue;
@@ -86,10 +82,8 @@ export class ChargeMigrationService {
 
                         if (chargeRecord) {
                             progress.successful++;
-                            console.log(`Successfully migrated charge for lot: ${stock.lotNumber}`);
                         } else {
                             // This happens when lot is not chargeable (shouldn't occur due to filter)
-                            console.log(`Lot ${stock.lotNumber} is not chargeable, skipping`);
                             progress.successful++;
                         }
 
@@ -113,7 +107,6 @@ export class ChargeMigrationService {
                     // Report progress periodically
                     if (progress.processed % this.PROGRESS_REPORT_INTERVAL === 0) {
                         const percentage = ((progress.processed / progress.total) * 100).toFixed(1);
-                        console.log(`Migration progress: ${progress.processed}/${progress.total} (${percentage}%) - Success: ${progress.successful}, Failed: ${progress.failed}`);
 
                         if (onProgress) {
                             onProgress({ ...progress });
@@ -130,13 +123,9 @@ export class ChargeMigrationService {
             progress.endTime = new Date();
             progress.duration = progress.endTime.getTime() - progress.startTime.getTime();
 
-            console.log(`Migration completed in ${progress.duration}ms`);
-            console.log(`Total: ${progress.total}, Successful: ${progress.successful}, Failed: ${progress.failed}`);
 
             if (progress.errors.length > 0) {
-                console.log('Migration errors:');
                 progress.errors.forEach(error => {
-                    console.log(`  - ${error.lotNumber}: ${error.error}`);
                 });
             }
 
@@ -161,7 +150,6 @@ export class ChargeMigrationService {
             onError
         } = options;
 
-        console.log(`Starting migration for ${lotNumbers.length} specific lots...`);
 
         const progress: MigrationProgress = {
             total: lotNumbers.length,
@@ -178,7 +166,6 @@ export class ChargeMigrationService {
                     // Check if stock exists and is chargeable
                     const stock = await Stock.findOne({ lotNumber, chargeable: true }).lean();
                     if (!stock) {
-                        console.log(`Lot ${lotNumber} not found or not chargeable, skipping`);
                         progress.processed++;
                         progress.successful++;
                         continue;
@@ -188,7 +175,6 @@ export class ChargeMigrationService {
                     if (skipExisting) {
                         const stockRecord = await Stock.findOne({ lotNumber }).lean();
                         if (stockRecord?.chargeCalculated) {
-                            console.log(`Skipping existing charge data for lot: ${lotNumber}`);
                             progress.processed++;
                             progress.successful++;
                             continue;
@@ -200,9 +186,7 @@ export class ChargeMigrationService {
 
                     if (chargeRecord) {
                         progress.successful++;
-                        console.log(`Successfully migrated charge for lot: ${lotNumber}`);
                     } else {
-                        console.log(`Lot ${lotNumber} is not chargeable, skipping`);
                         progress.successful++;
                     }
 
@@ -231,8 +215,6 @@ export class ChargeMigrationService {
             progress.endTime = new Date();
             progress.duration = progress.endTime.getTime() - progress.startTime.getTime();
 
-            console.log(`Lot-specific migration completed in ${progress.duration}ms`);
-            console.log(`Total: ${progress.total}, Successful: ${progress.successful}, Failed: ${progress.failed}`);
 
             return progress;
 

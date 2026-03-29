@@ -27,7 +27,6 @@ export class ChargeMaintenanceUtils {
             batchSize = 100
         } = options;
 
-        console.log('Starting complete charge data setup...');
 
         const results: {
             migration: MigrationProgress;
@@ -38,35 +37,28 @@ export class ChargeMaintenanceUtils {
         try {
             // Step 1: Cleanup existing data if requested
             if (cleanupBeforeMigration) {
-                console.log('Step 1: Cleaning up existing charge data...');
                 results.cleanup = await ChargeValidationService.cleanupChargeData();
             }
 
             // Step 2: Migrate charge data
-            console.log('Step 2: Migrating charge data...');
             results.migration = await ChargeMigrationService.migrateAllChargeableStocks({
                 batchSize,
                 skipExisting,
                 onProgress: (progress) => {
                     const percentage = ((progress.processed / progress.total) * 100).toFixed(1);
-                    console.log(`Migration progress: ${progress.processed}/${progress.total} (${percentage}%) - Success: ${progress.successful}, Failed: ${progress.failed}`);
                 }
             });
 
             // Step 3: Validate migrated data if requested
             if (validateAfterMigration) {
-                console.log('Step 3: Validating migrated charge data...');
                 results.validation = await ChargeValidationService.validateAllCharges();
 
                 // If validation found issues, attempt to fix them
                 if (results.validation.invalid > 0) {
-                    console.log(`Found ${results.validation.invalid} invalid charges, attempting to fix...`);
                     const fixResult = await ChargeValidationService.fixInvalidCharges(results.validation.results);
-                    console.log(`Fix result: Fixed: ${fixResult.fixed}, Failed: ${fixResult.failed}`);
                 }
             }
 
-            console.log('Complete charge data setup finished successfully');
             return results;
 
         } catch (error) {
@@ -84,19 +76,15 @@ export class ChargeMaintenanceUtils {
         validation: ValidationSummary;
         stats: any;
     }> {
-        console.log('Starting routine charge data maintenance...');
 
         try {
             // Check data consistency
-            console.log('Checking data consistency...');
             const consistency = await ChargeValidationService.checkDataConsistency();
 
             // Cleanup orphaned and invalid data
-            console.log('Cleaning up charge data...');
             const cleanup = await ChargeValidationService.cleanupChargeData();
 
             // Validate a sample of charges (limit to 1000 for performance)
-            console.log('Validating charge data sample...');
             const Stock = await import('../models/stock.js').then(m => m.default);
             const allChargeLots = await Stock.distinct('lotNumber', { chargeCalculated: true });
             const sampleSize = Math.min(1000, allChargeLots.length);
@@ -106,10 +94,6 @@ export class ChargeMaintenanceUtils {
             // Get current stats
             const stats = await ChargeValidationService.getValidationStats();
 
-            console.log('Routine maintenance completed');
-            console.log(`Consistency issues found: ${consistency.chargesWithoutStock.length + consistency.nonChargeableWithCharges.length}`);
-            console.log(`Cleanup: Removed ${cleanup.orphanedChargesRemoved + cleanup.invalidChargesRemoved}, Fixed ${cleanup.inconsistentChargesFixed}`);
-            console.log(`Validation: ${validation.valid}/${validation.total} valid (${validation.validationPercentage.toFixed(1)}%)`);
 
             return {
                 consistency,
@@ -138,7 +122,6 @@ export class ChargeMaintenanceUtils {
         stats: any;
     }> {
         try {
-            console.log('Getting charge data system status...');
 
             const [migration, consistency, stats] = await Promise.all([
                 ChargeMigrationService.getMigrationStatus(),
@@ -166,31 +149,25 @@ export class ChargeMaintenanceUtils {
         migration: MigrationProgress;
         validation: ValidationSummary;
     }> {
-        console.log('Starting emergency repair of charge data...');
 
         try {
             // Step 1: Cleanup all inconsistent data
-            console.log('Emergency Step 1: Cleaning up all inconsistent data...');
             const cleanup = await ChargeValidationService.cleanupChargeData();
 
             // Step 2: Re-migrate all missing charges
-            console.log('Emergency Step 2: Re-migrating all missing charges...');
             const pendingLots = await ChargeMigrationService.findPendingMigrations();
             const migration = await ChargeMigrationService.migrateLots(pendingLots, {
                 skipExisting: false // Force recalculation
             });
 
             // Step 3: Validate everything
-            console.log('Emergency Step 3: Validating all charges...');
             const validation = await ChargeValidationService.validateAllCharges();
 
             // Step 4: Fix any remaining invalid charges
             if (validation.invalid > 0) {
-                console.log('Emergency Step 4: Fixing remaining invalid charges...');
                 await ChargeValidationService.fixInvalidCharges(validation.results);
             }
 
-            console.log('Emergency repair completed');
             return {
                 cleanup,
                 migration,

@@ -78,8 +78,6 @@ export class DataDecryptionService {
 
             // Get all models with encrypted fields
             const modelsWithEncryption = this.getModelsWithEncryptedFields();
-            console.log('DataDecryptionService: Found models with encryption:', modelsWithEncryption.length);
-            console.log('Models:', modelsWithEncryption.map(m => ({ name: m.model.collection.name, fields: m.encryptedFields })));
 
             // Calculate total records
             this.progress.totalRecords = await this.calculateTotalRecords(modelsWithEncryption);
@@ -243,7 +241,6 @@ export class DataDecryptionService {
                     break;
                 }
 
-                console.log(`Decrypting record ${record._id} in ${model.collection.name}`);
                 await this.decryptRecord(
                     model,
                     record,
@@ -283,20 +280,18 @@ export class DataDecryptionService {
                 const fieldValue = this.getFieldValue(record, fieldName);
 
                 if (fieldValue !== null && fieldValue !== undefined) {
-                    console.log(`Processing field ${fieldName} with value type:`, typeof fieldValue);
-                    console.log(`Field ${fieldName} value sample:`, typeof fieldValue === 'string' ? fieldValue.substring(0, 100) : JSON.stringify(fieldValue).substring(0, 100));
-                    console.log(`Field ${fieldName} looks encrypted:`, this.looksLikeEncryptedData(fieldValue));
-
                     // Decrypt the field value
-                    const decryptedValue = await this.decryptFieldValue(fieldValue, currentKey);
+                    const decryptedValue = this.normalizeDecryptedValueForSchema(
+                        await this.decryptFieldValue(fieldValue, currentKey),
+                        model.schema,
+                        fieldName
+                    );
 
                     // Only update if the value was actually encrypted
                     if (decryptedValue !== fieldValue) {
-                        console.log(`Field ${fieldName} decrypted successfully`);
                         updates[fieldName] = decryptedValue;
                         hasUpdates = true;
                     } else {
-                        console.log(`Field ${fieldName} was not encrypted or already decrypted`);
                     }
                 }
             } catch (error) {
@@ -316,7 +311,6 @@ export class DataDecryptionService {
 
         // Update the record if there are changes
         if (hasUpdates) {
-            console.log(`Updating record ${record._id} with decrypted data:`, Object.keys(updates));
             // Use raw MongoDB collection to bypass Mongoose middleware that would re-encrypt the data
             const collection = model.collection;
             await collection.updateOne({ _id: record._id }, { $set: updates });
@@ -339,68 +333,7 @@ export class DataDecryptionService {
                 return encryptedValue;
             }
 
-            let parsedValue = encryptedValue;
-
-            // If it's a string, parse it first
-            if (typeof encryptedValue === 'string') {
-                try {
-                    parsedValue = JSON.parse(encryptedValue);
-                } catch {
-                    return encryptedValue;
-                }
-            }
-
-            // Handle arrays of encrypted data
-            if (Array.isArray(parsedValue)) {
-                const decryptedArray: any[] = [];
-                for (const item of parsedValue) {
-                    if (item && CryptoService.isEncryptedData(item)) {
-                        const decryptedItem = CryptoService.decrypt(item, key);
-                        // Keep decrypted values as strings to preserve formatting (important for contact numbers)
-                        decryptedArray.push(decryptedItem);
-                    } else if (typeof item === 'string') {
-                        // Handle nested JSON string containing array of encrypted objects
-                        try {
-                            const nestedArray = JSON.parse(item);
-                            if (Array.isArray(nestedArray)) {
-                                const decryptedNestedArray: any[] = [];
-                                for (const nestedItem of nestedArray) {
-                                    if (CryptoService.isEncryptedData(nestedItem)) {
-                                        const decryptedNestedItem = CryptoService.decrypt(nestedItem, key);
-                                        // For contact numbers and similar fields, keep as string to preserve formatting
-                                        decryptedNestedArray.push(decryptedNestedItem);
-                                    } else {
-                                        decryptedNestedArray.push(nestedItem);
-                                    }
-                                }
-                                // Return the flattened array instead of nested structure
-                                decryptedArray.push(...decryptedNestedArray);
-                            } else if (CryptoService.isEncryptedData(nestedArray)) {
-                                const decryptedNestedItem = CryptoService.decrypt(nestedArray, key);
-                                // Keep as string to preserve formatting
-                                decryptedArray.push(decryptedNestedItem);
-                            } else {
-                                decryptedArray.push(item);
-                            }
-                        } catch {
-                            // Not a JSON string, keep as is
-                            decryptedArray.push(item);
-                        }
-                    } else {
-                        decryptedArray.push(item);
-                    }
-                }
-                return decryptedArray;
-            }
-
-            // Handle single encrypted data object
-            if (CryptoService.isEncryptedData(parsedValue)) {
-                const decryptedStr = CryptoService.decrypt(parsedValue, key);
-                // Return as string to preserve original formatting (important for contact numbers, IDs, etc.)
-                return decryptedStr;
-            }
-
-            return parsedValue;
+            return this.decryptStructuredValue(encryptedValue, key);
         } catch (error) {
             throw new Error(`Failed to decrypt field value: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
@@ -428,52 +361,113 @@ export class DataDecryptionService {
     }
 
     /**
+     * Normalizes decrypted values to match the schema shape.
+     * This avoids array-backed fields like contactNos being written back as a single string.
+     */
+    private normalizeDecryptedValueForSchema(
+        value: any,
+        schema: mongoose.Schema,
+        fieldPath: string
+    ): any {
+        const schemaType: any = schema.path(fieldPath);
+        const isArrayField =
+            schemaType instanceof mongoose.Schema.Types.Array ||
+            schemaType?.instance === 'Array' ||
+            Array.isArray(schemaType?.options?.type);
+
+        if (!isArrayField) {
+            return value;
+        }
+
+        if (Array.isArray(value)) {
+            return value.map(item => item == null ? item : String(item));
+        }
+
+        if (value == null || value === '') {
+            return [];
+        }
+
+        if (typeof value === 'string') {
+            try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) {
+                    return parsed.map(item => item == null ? item : String(item));
+                }
+            } catch {
+                // Plain strings for array fields should become a single-item array.
+            }
+        }
+
+        return [String(value)];
+    }
+
+    private decryptStructuredValue(value: any, key: Buffer): any {
+        if (value === null || value === undefined) {
+            return value;
+        }
+
+        if (CryptoService.isEncryptedData(value)) {
+            return CryptoService.decrypt(value, key);
+        }
+
+        if (Array.isArray(value)) {
+            const decryptedArray: any[] = [];
+            for (const item of value) {
+                const decryptedItem = this.decryptStructuredValue(item, key);
+                if (Array.isArray(decryptedItem)) {
+                    decryptedArray.push(...decryptedItem);
+                } else {
+                    decryptedArray.push(decryptedItem);
+                }
+            }
+            return decryptedArray;
+        }
+
+        if (typeof value === 'string') {
+            const parsed = this.tryParseStructuredString(value);
+            if (parsed !== undefined) {
+                return this.decryptStructuredValue(parsed, key);
+            }
+            return value;
+        }
+
+        return value;
+    }
+
+    private tryParseStructuredString(value: string): any | undefined {
+        const trimmed = value.trim();
+        if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) {
+            return undefined;
+        }
+
+        try {
+            return JSON.parse(value);
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
      * Checks if a value looks like encrypted data
      * @param value - The value to check
      * @returns True if the value looks like encrypted data
      */
     private looksLikeEncryptedData(value: any): boolean {
-        // Handle direct object (already parsed)
-        if (typeof value === 'object' && value !== null) {
-            // Check if it's an array of encrypted data or strings containing encrypted data
-            if (Array.isArray(value)) {
-                return value.some(item => {
-                    if (CryptoService.isEncryptedData(item)) {
-                        return true;
-                    }
-                    // Check if array item is a string containing encrypted data
-                    if (typeof item === 'string') {
-                        try {
-                            const parsed = JSON.parse(item);
-                            return CryptoService.isEncryptedData(parsed) ||
-                                (Array.isArray(parsed) && parsed.some(subItem => CryptoService.isEncryptedData(subItem)));
-                        } catch {
-                            return false;
-                        }
-                    }
-                    return false;
-                });
-            }
-
-            // Check if it's a single encrypted data object
-            return CryptoService.isEncryptedData(value);
+        if (value === null || value === undefined) {
+            return false;
         }
 
-        // Handle string (JSON encoded)
+        if (CryptoService.isEncryptedData(value)) {
+            return true;
+        }
+
+        if (Array.isArray(value)) {
+            return value.some(item => this.looksLikeEncryptedData(item));
+        }
+
         if (typeof value === 'string') {
-            try {
-                const parsed = JSON.parse(value);
-
-                // Check if it's an array of encrypted data
-                if (Array.isArray(parsed)) {
-                    return parsed.some(item => CryptoService.isEncryptedData(item));
-                }
-
-                // Check if it's a single encrypted data object
-                return CryptoService.isEncryptedData(parsed);
-            } catch {
-                return false;
-            }
+            const parsed = this.tryParseStructuredString(value);
+            return parsed !== undefined ? this.looksLikeEncryptedData(parsed) : false;
         }
 
         return false;

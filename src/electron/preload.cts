@@ -105,7 +105,7 @@ contextBridge.exposeInMainWorld('electron', {
     db: {
         listCollections: async () => ipcRenderer.invoke('db:listCollections'),
         dropCollections: async (names: string[]) => ipcRenderer.invoke('db:dropCollections', names),
-        exportCollections: async (names: string[], format: 'json' | 'csv') => ipcRenderer.invoke('db:exportCollections', { names, format }),
+        exportCollections: async (names: string[], format: 'ejson' | 'json' | 'csv') => ipcRenderer.invoke('db:exportCollections', { names, format }),
         importCollections: async () => ipcRenderer.invoke('db:importCollections'),
     },
     company: {
@@ -162,6 +162,7 @@ contextBridge.exposeInMainWorld('electron', {
         getAll: async (params?: any) => ipcRenderer.invoke('stocks:getAll', params),
         getById: async (id: string) => ipcRenderer.invoke('stocks:getById', id),
         migrateLotNumbers: async () => ipcRenderer.invoke('stocks:migrateLotNumbers'),
+        migrateChargeRates: async () => ipcRenderer.invoke('stocks:migrateChargeRates'),
     },
     charges: {
         getAll: async (params?: any) => ipcRenderer.invoke('charges:getAll', params),

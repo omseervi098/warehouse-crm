@@ -69,6 +69,7 @@ export const stockBalanceApi = {
   getAll: (params?: any) => ipcCall(window.electron.stocks.getAll(params)),
   getById: (id: string) => ipcCall(window.electron.stocks.getById(id)),
   migrateLotNumbers: () => ipcCall(window.electron.stocks.migrateLotNumbers()),
+  migrateChargeRates: () => ipcCall((window.electron.stocks as any).migrateChargeRates()),
 };
 
 // Charges API
@@ -173,6 +174,6 @@ export const paymentsApi = {
 export const dbApi = {
   listCollections: () => ipcCall<string[]>(window.electron.db.listCollections()),
   dropCollections: (names: string[]) => ipcCall<{ dropped: string[]; failed: { name: string; error: string }[] }>(window.electron.db.dropCollections(names)),
-  exportCollections: (names: string[], format: 'json' | 'csv') => ipcCall<{ savedTo: string }>(window.electron.db.exportCollections(names, format)),
+  exportCollections: (names: string[], format: 'ejson' | 'json' | 'csv') => ipcCall<{ savedTo: string }>(window.electron.db.exportCollections(names, format)),
   importCollections: () => ipcCall<{ imported: { name: string; count: number }[]; skipped: { name: string; reason: string }[]; failed: { name: string; error: string }[] }>(window.electron.db.importCollections()),
 };

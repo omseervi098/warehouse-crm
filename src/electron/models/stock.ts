@@ -21,6 +21,7 @@ const stockSchema = new mongoose.Schema(
 
     // Charge calculation results
     totalCharge: { type: Number, default: 0 },
+    chargeRate: { type: Number },
     anchorDate: { type: Date },
     anniversaryDay: { type: Number },
 

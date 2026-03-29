@@ -510,7 +510,7 @@ const WarehouseChargesPage: React.FC = () => {
               )}
               <div>
                 <div className="font-semibold text-[11px] uppercase text-gray-500">Rate</div>
-                <div>₹ {(selectedCharge.unit.rate ?? 0).toFixed(2)}</div>
+                <div>₹ {(selectedCharge.chargeRate ?? selectedCharge.unit.rate ?? 0).toFixed(2)}</div>
               </div>
               <div>
                 <div className="font-semibold text-[11px] uppercase text-gray-500">Total Charge</div>

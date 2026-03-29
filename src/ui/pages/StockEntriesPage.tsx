@@ -98,7 +98,6 @@ const StockEntriesPage: React.FC = () => {
   };
 
   const handleEdit = (transactionId: string) => {
-    console.log('Edit action for', transactionId);
     openModal(stockTransactions.find(t => t._id === transactionId));
   };
 
@@ -109,7 +108,6 @@ const StockEntriesPage: React.FC = () => {
   const handleDeleteConfirm = async () => {
     if (deleteTargetId) {
       try {
-        console.log("Deleting:", deleteTargetId)
         await deleteStockTransaction(deleteTargetId);
         await fetchTransactions();
         setDeleteTargetId(null)
@@ -170,7 +168,6 @@ const StockEntriesPage: React.FC = () => {
             if (transactionData.partyId) {
               emailApi.sendOutwardReport(transactionData.batchId, transactionData.partyId)
                 .then(() => {
-                  console.log('Outward email sent successfully in background');
                   notify({ type: 'success', message: 'Email sent to party' });
                 })
                 .catch((emailError) => {

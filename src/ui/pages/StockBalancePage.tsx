@@ -342,7 +342,7 @@ const StockBalancePage: React.FC = () => {
                                             {selectedBalance.chargeable && (
                                                 <div>
                                                     <div className="font-semibold text-[11px] uppercase text-gray-500">Rate</div>
-                                                    <div>₹ {(selectedBalance.unit.rate ?? 0).toFixed(2)}</div>
+                                                    <div>₹ {(selectedBalance.chargeRate ?? selectedBalance.unit.rate ?? 0).toFixed(2)}</div>
                                                 </div>
                                             )}
                                         </div>

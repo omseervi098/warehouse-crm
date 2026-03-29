@@ -59,7 +59,10 @@ function buildPrefix(transactions: any[]) {
 function balanceAt(prefix: Array<{ at: Date; bal: number }>, boundary: Date): number {
   let bal = 0; for (let i = 0; i < prefix.length; i++) { if (prefix[i].at <= boundary) bal = prefix[i].bal; else break; } return bal;
 }
-async function rateAt(unitId: any, _when: Date): Promise<number> {
+async function rateAt(stock: any, unitId: any, _when: Date): Promise<number> {
+  if (typeof stock?.chargeRate === 'number') {
+    return stock.chargeRate;
+  }
   const unit = await Unit.findById(unitId).lean<{ rate?: number }>();
   return unit?.rate ?? 0;
 }
@@ -81,8 +84,8 @@ export async function computeChargesForLot(stock: any, includeBreakdown: boolean
   const prefix = buildPrefix(txns);
   const balD1 = balanceAt(prefix, day1End);
   const balD2 = balanceAt(prefix, day2End);
-  const rateD1 = await rateAt(stock.unit._id || stock.unit, day1End);
-  const rateD2 = await rateAt(stock.unit._id || stock.unit, day2End);
+  const rateD1 = await rateAt(stock, stock.unit._id || stock.unit, day1End);
+  const rateD2 = await rateAt(stock, stock.unit._id || stock.unit, day2End);
   const amtD1 = round2(balD1 * rateD1);
   const amtD2 = round2(Math.max(0, balD2 - balD1) * rateD2);
   const firstMonth = { day1: balD1 > 0 ? { date: day1End, balance: balD1, amount: amtD1 } : undefined, day2: balD2 > balD1 ? { date: day2End, balance: balD2, amount: amtD2 } : undefined, combined: round2(amtD1 + amtD2) };
@@ -95,7 +98,7 @@ export async function computeChargesForLot(stock: any, includeBreakdown: boolean
   while (anniv <= now) {
     const bal = balanceAt(prefix, anniv);
     if (bal > 0) {
-      const r = await rateAt(stock.unit._id || stock.unit, anniv);
+      const r = await rateAt(stock, stock.unit._id || stock.unit, anniv);
       const amt = round2(bal * r);
       rows.push({ date: anniv, label: `${anniv.toLocaleString('default', { month: 'short' })} ${anniv.getUTCFullYear().toString()} Charge`, balanceAtBoundary: bal, rateApplied: r, amount: amt });
     }
@@ -123,5 +126,5 @@ export async function computeChargesForLot(stock: any, includeBreakdown: boolean
     merged.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     breakdown = merged;
   }
-  return { ...baseLotFields(stock), anchorDate, anniversaryDay, firstMonth, charge: totalCharge, totalCharge, breakdown };
+  return { ...baseLotFields(stock), chargeRate: typeof stock?.chargeRate === 'number' ? stock.chargeRate : rateD1, anchorDate, anniversaryDay, firstMonth, charge: totalCharge, totalCharge, breakdown };
 }
