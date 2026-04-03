@@ -9,6 +9,15 @@ import { EmailContent } from './emailService.js';
  * ReportGenerator creates email content for different types of reports
  */
 export class ReportGenerator {
+    private static getCompanyDisplayName(company: any): string {
+        const warehouseName = company?.warehouseName?.trim?.();
+        if (warehouseName) {
+            return warehouseName;
+        }
+
+        const appName = process.env.VITE_APP_NAME?.trim();
+        return appName || 'Warehouse CRM';
+    }
 
     /**
      * Generates an outward transaction report for a specific D.O. number
@@ -35,7 +44,8 @@ export class ReportGenerator {
 
             // Get party and company information
             const party = await Party.findById(partyId).lean();
-            const company = await Company.findOne().lean();
+            const companyDoc = await Company.findOne();
+            const company = companyDoc?.toObject ? companyDoc.toObject() : companyDoc;
 
             if (!party) {
                 throw new Error('Party not found');
@@ -84,6 +94,7 @@ export class ReportGenerator {
     ): Promise<string> {
         const firstTransaction = transactions[0];
         const deliveryDate = new Date(firstTransaction.enteredAt).toLocaleDateString();
+        const companyName = this.getCompanyDisplayName(company);
         // Get unique vehicle numbers
         const vehicleNumbers = [...new Set(transactions.map(t => t.vehicleNumber).filter(Boolean))];
         return `
@@ -216,7 +227,7 @@ export class ReportGenerator {
 <body>
     <div class="container">
         <div class="header">
-            <div class="company-name">${company?.warehouseName || process.env.VITE_APP_NAME || 'Warehouse CRM'}</div>
+            <div class="company-name">${companyName}</div>
             <div class="report-title">Outward Delivery Report</div>
             <div style="color: #6b7280; font-size: 14px;">D.O. Number: ${doNumber}</div>
         </div>
@@ -266,7 +277,7 @@ export class ReportGenerator {
         </table>
 
         <div class="footer">
-            <p>This is an automated delivery notification from ${company?.warehouseName || process.env.VITE_APP_NAME || 'Warehouse CRM'}.</p>
+            <p>This is an automated delivery notification from ${companyName}.</p>
             <p>Generated on ${new Date().toLocaleString()}</p>
         </div>
     </div>
@@ -322,7 +333,8 @@ export class ReportGenerator {
 
             // Get party and company information
             const party = await Party.findById(partyId).lean();
-            const company = await Company.findOne().lean();
+            const companyDoc = await Company.findOne();
+            const company = companyDoc?.toObject ? companyDoc.toObject() : companyDoc;
 
             if (!party) {
                 throw new Error('Party not found');
@@ -360,6 +372,7 @@ export class ReportGenerator {
         year: number
     ): Promise<string> {
         const monthName = new Date(year, month - 1).toLocaleDateString('en-US', { month: 'long' });
+        const companyName = this.getCompanyDisplayName(company);
         const activeStocks = stocks.filter(s => s.quantity > 0);
         // filter nil stock that became nil in this month
         const nilStocks = stocks.filter(s => s.isNil && new Date(s.latestEntryAt).getMonth() === month - 1 && new Date(s.latestEntryAt).getFullYear() === year);
@@ -510,7 +523,7 @@ export class ReportGenerator {
 <body>
     <div class="container">
         <div class="header">
-            <div class="company-name">${company?.warehouseName || process.env.VITE_APP_NAME || 'Warehouse CRM'}</div>
+            <div class="company-name">${companyName}</div>
             <div class="report-title">Monthly Stock Report</div>
             <div style="color: #6b7280; font-size: 14px;">${monthName} ${year}</div>
         </div>
@@ -596,7 +609,7 @@ export class ReportGenerator {
         ` : ''}
 
         <div class="footer">
-            <p>This is an automated monthly stock report from ${company?.warehouseName || process.env.VITE_APP_NAME || 'Warehouse CRM'}.</p>
+            <p>This is an automated monthly stock report from ${companyName}.</p>
             <p>Generated on ${new Date().toLocaleString()}</p>
         </div>
     </div>

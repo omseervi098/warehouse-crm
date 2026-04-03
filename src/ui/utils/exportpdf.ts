@@ -36,6 +36,28 @@ function hexToRgb(hex: string): [number, number, number] {
   }
   throw new Error(`Invalid hex color: ${hex}`);
 }
+
+async function getCompanyProfileOrNull(): Promise<CompanyProfileData | null> {
+  try {
+    const { data } = await companyApi.get();
+    return data ?? null;
+  } catch (error) {
+    console.warn('Could not fetch company profile for PDF export:', error);
+    return null;
+  }
+}
+
+function getCompanyDisplayName(companyProfile?: CompanyProfileData | null): string {
+  const warehouseName = companyProfile?.warehouseName?.trim();
+  if (warehouseName) {
+    return warehouseName;
+  }
+
+  // @ts-ignore
+  const appName = import.meta.env.VITE_APP_NAME?.trim();
+  return appName || "WAREHOUSE CRM";
+}
+
 async function previewPdf(doc: jsPDF, fileName: string) {
   const dataUri = doc.output('datauristring', { filename: fileName + '.pdf' });
   const result = await window.electron?.window?.pdfPreview?.(dataUri, fileName);
@@ -572,6 +594,8 @@ export async function downloadChargesReportPdf(
 export async function downloadGatepassPdf(gatepassData: GatepassData) {
   // A6 page in portrait
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a6" });
+  const companyProfile = await getCompanyProfileOrNull();
+  const companyName = getCompanyDisplayName(companyProfile);
 
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -581,8 +605,7 @@ export async function downloadGatepassPdf(gatepassData: GatepassData) {
   // Title
   doc.setFontSize(20);
   doc.setFont("helvetica", "bold");
-  //@ts-ignore
-  doc.text((import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM").toUpperCase(), pageW / 2, y, { align: "center" });
+  doc.text(companyName.toUpperCase(), pageW / 2, y, { align: "center" });
   y += 7;
 
   // small helper to draw pill/label + value (rounded rect + text)
@@ -714,13 +737,8 @@ export async function downloadBillPdf(bill: Bill) {
   let y = margin;
 
   // 1. Fetch Company Data (Dynamic)
-  let companyProfile: CompanyProfileData | null = null;
-  try {
-    const { data } = await companyApi.get();
-    companyProfile = data;
-  } catch (error) {
-    console.warn('Could not fetch company profile for bill PDF:', error);
-  }
+  const companyProfile = await getCompanyProfileOrNull();
+  const companyName = getCompanyDisplayName(companyProfile);
 
   // 2. Fetch Party Data (Dynamic for address) if needed
   // Note: bill.party (if from create/history) might be populated. 
@@ -778,15 +796,12 @@ export async function downloadBillPdf(bill: Bill) {
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(20, 20, 80); // Dark Blue
   // @ts-ignore
-  const warehouseName = companyProfile?.warehouseName || import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM";
-  // @ts-ignore
-  if (warehouseName.toUpperCase().includes(import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM")) {
-    // @ts-ignore
-    doc.text((import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM").split(" ")[0], pageW - margin - 5, y + 8, { align: 'right' });
-    // @ts-ignore
-    doc.text((import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM").split(" ")[0], pageW - margin - 5, y + 18, { align: 'right' });
+  const appName = import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM";
+  if (companyName.toUpperCase().includes(appName)) {
+    doc.text(appName.split(" ")[0], pageW - margin - 5, y + 8, { align: 'right' });
+    doc.text(appName.split(" ")[0], pageW - margin - 5, y + 18, { align: 'right' });
   } else {
-    doc.text(warehouseName, pageW - margin - 5, y + 12, { align: 'right' });
+    doc.text(companyName, pageW - margin - 5, y + 12, { align: 'right' });
   }
 
   // Line separator
@@ -1050,8 +1065,7 @@ export async function downloadBillPdf(bill: Bill) {
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(50, 50, 150);
 
-  //@ts-ignore
-  doc.text(`For ${(import.meta.env.VITE_APP_NAME || "WAREHOUSE CRM").toUpperCase()}`, pageW - margin - 5, footerY + 6, { align: 'right' });
+  doc.text(`For ${companyName.toUpperCase()}`, pageW - margin - 5, footerY + 6, { align: 'right' });
 
   // Payment Terms (Bottom Left)
   doc.setFont('helvetica', 'normal');
@@ -1080,19 +1094,14 @@ export async function downloadBillingHistoryPdf(
   let y = margin;
 
   // Get company profile for header
-  let companyProfile: CompanyProfileData | null = null;
-  try {
-    const { data } = await companyApi.get();
-    companyProfile = data;
-  } catch (error) {
-    console.warn('Could not fetch company profile for billing history PDF:', error);
-  }
+  const companyProfile = await getCompanyProfileOrNull();
+  const companyName = getCompanyDisplayName(companyProfile);
 
   // Header - Company Information
-  if (companyProfile) {
+  if (companyProfile || companyName) {
     doc.setFontSize(18);
     doc.setFont('helvetica', 'bold');
-    doc.text(companyProfile.warehouseName || 'Warehouse', pageW / 2, y, { align: 'center' });
+    doc.text(companyName, pageW / 2, y, { align: 'center' });
     y += 8;
 
     doc.setFontSize(10);
