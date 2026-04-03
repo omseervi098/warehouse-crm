@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-
+import dns from "node:dns";
 import Bill from './models/bill.js';
 import Company from './models/company.js';
 import Item from './models/item.js';
@@ -38,6 +38,8 @@ const require = createRequire(import.meta.url);
 const AdmZip: any = require('adm-zip');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Papa: any = require('papaparse');
+
+dns.setServers(['8.8.8.8', '1.1.1.1'])
 
 if (app.isPackaged) {
     dotenv.config({ path: path.join(process.resourcesPath, '.env') });
@@ -128,7 +130,10 @@ async function initMongo() {
     const mongoUri = fromKeytar || process.env.MONGO_URI;
     if (!mongoUri) return false;
     if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(mongoUri);
+        await mongoose.connect(mongoUri, {
+            family: 4,
+            serverSelectionTimeoutMS: 10000,
+        });
     }
     return true;
 }
