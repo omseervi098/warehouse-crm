@@ -323,7 +323,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       // Update the related bill in the bills state
       if (response.data.bill?._id) {
         setBills(prev => prev.map(bill => {
-          if (bill._id === response.data.bill._id) {
+          if (bill._id === response.data.bill?._id) {
             const newPaidAmount = bill.paidAmount + response.data.amount;
             const newOutstandingAmount = bill.amount - newPaidAmount;
             let newStatus: 'unpaid' | 'partial' | 'paid' = 'unpaid';

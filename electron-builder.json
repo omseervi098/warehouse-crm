@@ -21,7 +21,6 @@
         "category": "Utility"
     },
     "win": {
-        "target": "portable",
-        "signAndEditExecutable": false
+        "target": "nsis"
     }
 }

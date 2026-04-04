@@ -1,7 +1,7 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Bill, Charge, CompanyProfileData, GatepassData, StockBalance } from '../types';
-import { companyApi, paymentsApi, stockBalanceApi } from './api';
+import {Bill, BillingHistoryItem, Charge, CompanyProfileData, GatepassData, Party, StockBalance} from '../types';
+import { chargesApi, companyApi, paymentsApi, stockBalanceApi } from './api';
 
 export interface ExportOptions {
   title?: string;
@@ -1037,7 +1037,6 @@ export async function downloadBillPdf(bill: Bill) {
   doc.text(secondLine, margin + 5, totalLineY + 8);
 
   // TOTAL calculation
-  let colX = margin;
   const colWidths = columns.map((c: any) => c.width);
   const balanceColX = margin + colWidths[0] + colWidths[1] + colWidths[2]; // Start of Balance col
   const balanceColW = colWidths[3];
@@ -1080,24 +1079,77 @@ export async function downloadBillPdf(bill: Bill) {
   await previewPdf(doc, `Bill_${bill.billNumber}`);
 }
 
-export async function downloadBillingHistoryPdf(
-  partyName: string,
-  historyItems: any[],
-  filters: { startDate: string; endDate: string; transactionType: string }
-) {
-  // Create A4 page in portrait
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+type BillingHistoryFilters = { startDate: string; endDate: string; transactionType: string };
 
+function formatPdfDate(date?: string) {
+  if (!date) return '';
+  return new Date(date).toLocaleDateString('en-GB');
+}
+
+function formatPdfAmount(amount: number) {
+  return amount.toFixed(2);
+}
+
+function getDisplayBillNumber(billNumber?: string) {
+  if (!billNumber) return '';
+  const parts = billNumber.split('|');
+  return parts.length > 1 ? parts[parts.length - 1] : billNumber;
+}
+
+function getFinancialYearStartFromDate(date: string) {
+  const dt = new Date(date);
+  return dt.getMonth() + 1 < 4 ? dt.getFullYear() - 1 : dt.getFullYear();
+}
+
+function getQuarterFromDate(date: string): 'Q1' | 'Q2' | 'Q3' | 'Q4' {
+  const month = new Date(date).getMonth() + 1;
+  if (month >= 4 && month <= 6) return 'Q1';
+  if (month >= 7 && month <= 9) return 'Q2';
+  if (month >= 10 && month <= 12) return 'Q3';
+  return 'Q4';
+}
+
+function getQuarterPeriodLabel(quarter: 'Q1' | 'Q2' | 'Q3' | 'Q4', financialYear: number) {
+  if (quarter === 'Q1') return `APR-JUN ${financialYear}`;
+  if (quarter === 'Q2') return `JUL-SEP ${financialYear}`;
+  if (quarter === 'Q3') return `OCT-DEC ${financialYear}`;
+  return `JAN-MAR ${financialYear + 1}`;
+}
+
+function getFinancialYearLabel(financialYear: number) {
+  return `${financialYear}-${financialYear + 1}`;
+}
+
+function getPaymentModeText(item: BillingHistoryItem) {
+  const ref = item.bankDetails?.accountNumber || item.paymentNumber || '';
+  if (item.paymentMethod === 'bank') return ref ? `BANK ${ref}` : 'BANK';
+  if (item.paymentMethod === 'cash') return 'CASH';
+  return ref;
+}
+
+function getPaymentBankText(item: BillingHistoryItem) {
+  const parts = [
+    item.bankDetails?.bankName,
+    item.bankDetails?.accountNumber ? `A/C ${item.bankDetails.accountNumber}` : undefined,
+    item.notes
+  ].filter(Boolean);
+  return parts.join(' | ');
+}
+
+async function renderGenericBillingHistoryPdf(
+  partyName: string,
+  historyItems: BillingHistoryItem[],
+  filters: BillingHistoryFilters
+) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const margin = 15;
   let y = margin;
 
-  // Get company profile for header
   const companyProfile = await getCompanyProfileOrNull();
   const companyName = getCompanyDisplayName(companyProfile);
 
-  // Header - Company Information
   if (companyProfile || companyName) {
     doc.setFontSize(18);
     doc.setFont('helvetica', 'bold');
@@ -1106,16 +1158,16 @@ export async function downloadBillingHistoryPdf(
 
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    if (companyProfile.address) {
+    if (companyProfile?.address) {
       doc.text(companyProfile.address, pageW / 2, y, { align: 'center' });
       y += 5;
     }
 
     const contactInfo = [];
-    if (companyProfile.contactNos && companyProfile.contactNos.length > 0) {
+    if (companyProfile?.contactNos?.length) {
       contactInfo.push(`Phone: ${companyProfile.contactNos.join(', ')}`);
     }
-    if (companyProfile.email) {
+    if (companyProfile?.email) {
       contactInfo.push(`Email: ${companyProfile.email}`);
     }
     if (contactInfo.length > 0) {
@@ -1123,20 +1175,17 @@ export async function downloadBillingHistoryPdf(
       y += 5;
     }
   } else {
-    // Fallback header
     doc.setFontSize(18);
     doc.setFont('helvetica', 'bold');
     doc.text('BILLING HISTORY REPORT', pageW / 2, y, { align: 'center' });
     y += 8;
   }
 
-  // Horizontal line
   y += 5;
   doc.setLineWidth(0.5);
   doc.line(margin, y, pageW - margin, y);
   y += 10;
 
-  // Report Title and Party Name
   doc.setFontSize(16);
   doc.setFont('helvetica', 'bold');
   doc.text('BILLING HISTORY', margin, y);
@@ -1147,20 +1196,12 @@ export async function downloadBillingHistoryPdf(
   doc.text(`Party: ${partyName}`, margin, y);
   y += 6;
 
-  // Filter Information
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
   const filterText = [];
-  if (filters.startDate) {
-    filterText.push(`From: ${new Date(filters.startDate).toLocaleDateString('en-IN')}`);
-  }
-  if (filters.endDate) {
-    filterText.push(`To: ${new Date(filters.endDate).toLocaleDateString('en-IN')}`);
-  }
-  if (filters.transactionType !== 'all') {
-    filterText.push(`Type: ${filters.transactionType.charAt(0).toUpperCase() + filters.transactionType.slice(1)}`);
-  }
+  if (filters.startDate) filterText.push(`From: ${new Date(filters.startDate).toLocaleDateString('en-IN')}`);
+  if (filters.endDate) filterText.push(`To: ${new Date(filters.endDate).toLocaleDateString('en-IN')}`);
+  if (filters.transactionType !== 'all') filterText.push(`Type: ${filters.transactionType}`);
   if (filterText.length > 0) {
+    doc.setFontSize(10);
     doc.text(filterText.join(' | '), margin, y);
     y += 6;
   }
@@ -1168,17 +1209,15 @@ export async function downloadBillingHistoryPdf(
   doc.text(`Generated on: ${new Date().toLocaleDateString('en-IN')} at ${new Date().toLocaleTimeString('en-IN')}`, margin, y);
   y += 10;
 
-  // Summary Statistics
   const totalTransactions = historyItems.length;
   const totalBills = historyItems.filter(item => item.type === 'bill').length;
-  const totalPayments = historyItems.filter(item => item.type === 'payment').length;
-  const totalAdditionalDebits = historyItems.filter(item => item.type === 'additional_debit').length;
+  const totalPayments = historyItems.filter(item => item.type === 'payment' && item.paymentFor !== 'rent').length;
+  const totalRentPayments = historyItems.filter(item => item.type === 'payment' && item.paymentFor === 'rent').length;
   const totalBillAmount = historyItems.filter(item => item.type === 'bill').reduce((sum, item) => sum + item.amount, 0);
-  const totalPaymentAmount = historyItems.filter(item => item.type === 'payment').reduce((sum, item) => sum + item.amount, 0);
-  const totalAdditionalDebitAmount = historyItems.filter(item => item.type === 'additional_debit').reduce((sum, item) => sum + item.amount, 0);
+  const totalPaymentAmount = historyItems.filter(item => item.type === 'payment' && item.paymentFor !== 'rent').reduce((sum, item) => sum + item.amount, 0);
+  const totalRentAmount = historyItems.filter(item => item.type === 'payment' && item.paymentFor === 'rent').reduce((sum, item) => sum + item.amount, 0);
   const currentBalance = historyItems.length > 0 ? historyItems[0].runningBalance : 0;
 
-  // Summary box
   doc.setDrawColor(200, 200, 200);
   doc.setFillColor(250, 250, 250);
   doc.roundedRect(margin, y, pageW - 2 * margin, 32, 3, 3, 'FD');
@@ -1190,30 +1229,23 @@ export async function downloadBillingHistoryPdf(
 
   doc.setFont('helvetica', 'normal');
   doc.text(`Total Transactions: ${totalTransactions}`, margin + 5, y + 12);
-  doc.text(`Bills: ${totalBills} (Rs ${totalBillAmount.toFixed(2)})`, margin + 5, y + 18);
-  doc.text(`Additional Debits: ${totalAdditionalDebits} (Rs ${totalAdditionalDebitAmount.toFixed(2)})`, margin + 5, y + 24);
-
-  doc.text(`Payments: ${totalPayments} (Rs ${totalPaymentAmount.toFixed(2)})`, pageW / 2 + 5, y + 12);
+  doc.text(`Bills: Rs ${totalBillAmount.toFixed(2)} (${totalBills})`, margin + 5, y + 18);
+  doc.text(`Rent: Rs ${totalRentAmount.toFixed(2)} (${totalRentPayments})`, margin + 5, y + 24);
+  doc.text(`Payments: Rs ${totalPaymentAmount.toFixed(2)} (${totalPayments})`, pageW / 2 + 5, y + 12);
 
   doc.setFont('helvetica', 'bold');
-  if (currentBalance > 0) {
-    doc.setTextColor(200, 50, 50); // Red for outstanding
-  } else {
-    doc.setTextColor(50, 150, 50); // Green for compliant
-  }
+  doc.setTextColor(currentBalance > 0 ? 200 : 50, currentBalance > 0 ? 50 : 150, 50);
   doc.text(`Current Balance: Rs ${currentBalance.toFixed(2)}`, pageW / 2 + 5, y + 18);
-  doc.setTextColor(0, 0, 0); // Reset color
-
+  doc.setTextColor(0, 0, 0);
   y += 42;
 
-  // Transaction History Table
   if (historyItems.length > 0) {
     const tableData = historyItems.map(item => [
       new Date(item.date).toLocaleDateString('en-IN'),
-      item.type === 'additional_debit' ? 'ADDITIONAL DEBIT' : item.type.toUpperCase(),
-      item.type === 'bill' ? item.billNumber : item.type === 'payment' ? item.paymentNumber : (item.periodType === 'quarterly' ? 'QTR' : 'MTH'),
+      item.type === 'payment' && item.paymentFor === 'rent' ? 'RENT' : item.type.toUpperCase(),
+      item.type === 'bill' ? item.billNumber : item.paymentNumber || item.quarter || 'RENT',
       item.description,
-      item.type === 'payment' && item.paymentMethod ? item.paymentMethod.toUpperCase() : item.type === 'additional_debit' && item.periodType ? item.periodType.toUpperCase() : '',
+      item.type === 'payment' && item.paymentMethod ? item.paymentMethod.toUpperCase() : '',
       `Rs ${item.amount.toFixed(2)}`,
       `Rs ${item.runningBalance.toFixed(2)}`
     ]);
@@ -1223,62 +1255,19 @@ export async function downloadBillingHistoryPdf(
       head: [['Date', 'Type', 'Number', 'Description', 'Method', 'Amount', 'Balance']],
       body: tableData,
       theme: 'striped',
-      headStyles: {
-        fillColor: [66, 139, 202],
-        textColor: 255,
-        fontSize: 9,
-        fontStyle: 'bold'
-      },
-      bodyStyles: {
-        fontSize: 8,
-        textColor: 50
-      },
+      headStyles: { fillColor: [66, 139, 202], textColor: 255, fontSize: 9, fontStyle: 'bold' },
+      bodyStyles: { fontSize: 8, textColor: 50 },
       columnStyles: {
-        0: { cellWidth: 20 }, // Date
-        1: { cellWidth: 15 }, // Type
-        2: { cellWidth: 25 }, // Number
-        3: { cellWidth: 50 }, // Description
-        4: { cellWidth: 20 }, // Method
-        5: { cellWidth: 20, halign: 'right' }, // Amount
-        6: { cellWidth: 20, halign: 'right' }  // Balance
+        0: { cellWidth: 20 },
+        1: { cellWidth: 15 },
+        2: { cellWidth: 25 },
+        3: { cellWidth: 50 },
+        4: { cellWidth: 20 },
+        5: { cellWidth: 20, halign: 'right' },
+        6: { cellWidth: 20, halign: 'right' }
       },
-      alternateRowStyles: {
-        fillColor: [249, 249, 250]
-      },
-      margin: { left: margin, right: margin },
-      didParseCell: function (data: any) {
-        // Color code transaction types
-        if (data.column.index === 1) { // Type column
-          if (data.cell.text[0] === 'BILL') {
-            data.cell.styles.textColor = [220, 53, 69]; // Red for bills
-          } else if (data.cell.text[0] === 'PAYMENT') {
-            data.cell.styles.textColor = [40, 167, 69]; // Green for payments
-          } else if (data.cell.text[0] === 'ADDITIONAL DEBIT') {
-            data.cell.styles.textColor = [217, 119, 6];
-          }
-        }
-        // Color code amounts
-        if (data.column.index === 5) { // Amount column
-          const rowIndex = data.row.index;
-          if (tableData[rowIndex] && tableData[rowIndex][1] === 'BILL') {
-            data.cell.styles.textColor = [220, 53, 69]; // Red for bill amounts
-          } else if (tableData[rowIndex] && tableData[rowIndex][1] === 'ADDITIONAL DEBIT') {
-            data.cell.styles.textColor = [217, 119, 6];
-          } else {
-            data.cell.styles.textColor = [40, 167, 69]; // Green for payment amounts
-          }
-        }
-        // Color code balance
-        if (data.column.index === 6) { // Balance column
-          const balanceText = data.cell.text[0];
-          const balance = parseFloat(balanceText.replace('Rs ', ''));
-          if (balance > 0) {
-            data.cell.styles.textColor = [220, 53, 69]; // Red for positive balance (outstanding)
-          } else {
-            data.cell.styles.textColor = [40, 167, 69]; // Green for zero/negative balance
-          }
-        }
-      }
+      alternateRowStyles: { fillColor: [249, 249, 250] },
+      margin: { left: margin, right: margin }
     });
 
     y = (doc as any).lastAutoTable.finalY + 10;
@@ -1289,20 +1278,226 @@ export async function downloadBillingHistoryPdf(
     y += 40;
   }
 
-  // Footer
   y = pageH - 30;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(128, 128, 128);
-
-  // Add horizontal line above footer
   doc.setLineWidth(0.3);
   doc.line(margin, y - 5, pageW - margin, y - 5);
-
   doc.text('This is a computer-generated report.', margin, y);
-  doc.text(`Page 1 of 1`, pageW - margin, y, { align: 'right' });
+  doc.text('Page 1 of 1', pageW - margin, y, { align: 'right' });
 
-  // Generate and preview PDF
-  const fileName = `BillingHistory_${partyName.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}`;
-  await previewPdf(doc, fileName);
+  await previewPdf(doc, `BillingHistory_${partyName.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}`);
+}
+
+export async function downloadBillingHistoryPdf(
+  party: Pick<Party, '_id' | 'name'>,
+  historyItems: BillingHistoryItem[],
+  filters: BillingHistoryFilters
+) {
+  const resolvedFinancialYears = Array.from(new Set(
+    historyItems
+      .map(item => item.financialYear ?? item.billYear ?? getFinancialYearStartFromDate(item.date))
+      .filter((year): year is number => Number.isFinite(year))
+  ));
+
+  if (filters.transactionType !== 'all' || resolvedFinancialYears.length !== 1) {
+    await renderGenericBillingHistoryPdf(party.name, historyItems, filters);
+    return;
+  }
+
+  const financialYear = resolvedFinancialYears[0];
+  const quarterlyChargeTotals: Record<'Q1' | 'Q2' | 'Q3' | 'Q4', number> = {
+    Q1: 0,
+    Q2: 0,
+    Q3: 0,
+    Q4: 0
+  };
+  const bills = historyItems
+    .filter((item) => item.type === 'bill')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  await Promise.all((['Q1', 'Q2', 'Q3', 'Q4'] as const).map(async (quarter) => {
+    try {
+      const { data } = await chargesApi.getQuarterCharges(party._id, quarter, financialYear);
+      const charges = Array.isArray(data) ? data : [];
+      quarterlyChargeTotals[quarter] = charges.reduce((sum, charge) => sum + (charge.totalCharge || 0), 0);
+    } catch (error) {
+      console.warn(`Could not load quarter charges for ${quarter} ${financialYear}:`, error);
+      quarterlyChargeTotals[quarter] = 0;
+    }
+  }));
+
+  const payments = historyItems
+    .filter((item) => item.type === 'payment' && item.paymentFor !== 'rent')
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  const quarterlyDebits: Record<'Q1' | 'Q2' | 'Q3' | 'Q4', BillingHistoryItem[]> = {
+    Q1: [],
+    Q2: [],
+    Q3: [],
+    Q4: []
+  };
+
+  historyItems
+    .filter((item) => item.type === 'payment' && item.paymentFor === 'rent')
+    .forEach((item) => {
+      const quarter = item.quarter || getQuarterFromDate(item.date);
+      quarterlyDebits[quarter].push(item);
+    });
+
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageW = doc.internal.pageSize.getWidth();
+  const margin = 10;
+  let y = 12;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.text(`PAYMENT DETAILS (${party.name.toUpperCase()})`, pageW / 2, y, { align: 'center' });
+  y += 7;
+  doc.setFontSize(11);
+  doc.text(`YEAR ${getFinancialYearLabel(financialYear)}`, pageW / 2, y, { align: 'center' });
+  y += 5;
+
+  const topRowCount = Math.max(bills.length, payments.length, 1);
+  const topRows = Array.from({ length: topRowCount }, (_, index) => {
+    const bill = bills[index];
+    const payment = payments[index];
+    return [
+      `${index + 1}`,
+      bill ? formatPdfDate(bill.billDate || bill.date) : '',
+      getDisplayBillNumber(bill?.billNumber),
+      bill?.quarter ? getQuarterPeriodLabel(bill.quarter, bill.billYear || financialYear) : '',
+      bill ? formatPdfAmount(bill.amount) : '',
+      payment ? formatPdfDate(payment.date) : '',
+      payment ? getPaymentModeText(payment) : '',
+      payment ? formatPdfAmount(payment.amount) : '',
+      payment ? getPaymentBankText(payment) : ''
+    ];
+  });
+
+  topRows.push([
+    'TOTAL',
+    '',
+    '',
+    '',
+    formatPdfAmount(bills.reduce((sum, item) => sum + item.amount, 0)),
+    '',
+    '',
+    formatPdfAmount(payments.reduce((sum, item) => sum + item.amount, 0)),
+    ''
+  ]);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['SR.NO.', 'DATE', 'BILL NO.', 'B. PERIOD', 'AMT.', 'DATE', 'CQ / ECS', 'AMT.', 'BANK DET.']],
+    body: topRows,
+    theme: 'grid',
+    margin: { left: margin, right: margin },
+    headStyles: {
+      fillColor: [245, 245, 245],
+      textColor: 0,
+      lineColor: [0, 0, 0],
+      lineWidth: 0.1,
+      fontSize: 7.5
+    },
+    bodyStyles: {
+      fontSize: 7.5,
+      lineColor: [0, 0, 0],
+      lineWidth: 0.1,
+      textColor: 20
+    },
+    columnStyles: {
+      0: { cellWidth: 12, halign: 'center' },
+      1: { cellWidth: 18 },
+      2: { cellWidth: 18 },
+      3: { cellWidth: 26 },
+      4: { cellWidth: 15, halign: 'right' },
+      5: { cellWidth: 18 },
+      6: { cellWidth: 24 },
+      7: { cellWidth: 15, halign: 'right' },
+      8: { cellWidth: 34 }
+    },
+    didParseCell: (data: any) => {
+      if (data.row.index === topRows.length - 1) {
+        data.cell.styles.fontStyle = 'bold';
+      }
+    }
+  });
+
+  y = (doc as any).lastAutoTable.finalY + 6;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text('ACTUAL WAREHOUSE CHARGES / RENT CREDITS', pageW / 2, y, { align: 'center' });
+  y += 3;
+
+  const bottomRows: string[][] = [];
+  (['Q1', 'Q2', 'Q3', 'Q4'] as const).forEach((quarter, index) => {
+    bottomRows.push([
+      `${index + 1}`,
+      getQuarterPeriodLabel(quarter, financialYear),
+      'Warehouse Charges',
+      '',
+      formatPdfAmount(quarterlyChargeTotals[quarter]),
+      ''
+    ]);
+
+    const debits = quarterlyDebits[quarter].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    if (debits.length > 0) {
+      debits.forEach((debit) => {
+        bottomRows.push([
+          '',
+          '',
+          'Rent',
+          formatPdfDate(debit.date),
+          `-${formatPdfAmount(debit.amount)}`,
+          debit.description
+        ]);
+      });
+    }
+  });
+
+  const totalCharges = Object.values(quarterlyChargeTotals).reduce((sum, amount) => sum + amount, 0);
+  bottomRows.push(['TOTAL', '', '', '', formatPdfAmount(totalCharges), 'Actual warehouse charges total']);
+
+  autoTable(doc, {
+    startY: y,
+    head: [['SR.NO.', 'PERIOD', 'ENTRY', 'DATE', 'AMOUNT', 'PARTICULARS']],
+    body: bottomRows,
+    theme: 'grid',
+    margin: { left: margin, right: margin },
+    headStyles: {
+      fillColor: [245, 245, 245],
+      textColor: 0,
+      lineColor: [0, 0, 0],
+      lineWidth: 0.1,
+      fontSize: 7.5
+    },
+    bodyStyles: {
+      fontSize: 7.5,
+      lineColor: [0, 0, 0],
+      lineWidth: 0.1,
+      textColor: 20
+    },
+    columnStyles: {
+      0: { cellWidth: 12, halign: 'center' },
+      1: { cellWidth: 28 },
+      2: { cellWidth: 28 },
+      3: { cellWidth: 18 },
+      4: { cellWidth: 20, halign: 'right' },
+      5: { cellWidth: 74 }
+    },
+    didParseCell: (data: any) => {
+      const entry = bottomRows[data.row.index]?.[2];
+      if (entry === 'Rent' || (typeof data.cell.text?.[0] === 'string' && data.cell.text[0].startsWith('-'))) {
+        data.cell.styles.textColor = [200, 40, 40];
+      }
+      if (data.row.index === bottomRows.length - 1) {
+        data.cell.styles.fontStyle = 'bold';
+      }
+    }
+  });
+
+  await previewPdf(doc, `AnnualBilling_${party.name.replace(/\s+/g, '_')}_${financialYear}-${financialYear + 1}`);
 }

@@ -10,7 +10,6 @@ import path from 'node:path';
 import dns from "node:dns";
 import Bill from './models/bill.js';
 import Company from './models/company.js';
-import AdditionalDebit from './models/additionalDebit.js';
 import Item from './models/item.js';
 import Party from "./models/party.js";
 import Payment from './models/payment.js';
@@ -63,6 +62,16 @@ try {
 
 function toPlain<T>(value: T): T {
     return value == null ? (value as T) : JSON.parse(JSON.stringify(value));
+}
+
+type NormalizedPaymentFor = 'bill_payment' | 'rent';
+
+function normalizePaymentFor(paymentFor?: string): NormalizedPaymentFor {
+    return paymentFor === 'rent' ? 'rent' : 'bill_payment';
+}
+
+function isRentPayment(paymentFor?: string): boolean {
+    return normalizePaymentFor(paymentFor) === 'rent';
 }
 
 function setupAutoUpdater(mainWindow: BrowserWindow, tray: Tray) {
@@ -1962,6 +1971,42 @@ function registerIpcHandlers() {
         } catch (e: any) { return { ok: false, error: e.message }; }
     });
 
+    ipcMain.handle('charges:getQuarterCharges', async (_e, args: { partyId: string; quarter: string; year: number }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId, quarter, year } = args;
+
+            const quarterMonths = {
+                Q1: [4, 5, 6],
+                Q2: [7, 8, 9],
+                Q3: [10, 11, 12],
+                Q4: [1, 2, 3]
+            };
+
+            const targetYear = quarter === 'Q4' ? year + 1 : year;
+
+            const charges = await Stock.find({
+                party: new mongoose.Types.ObjectId(partyId),
+                chargeCalculated: true,
+                chargeable: true
+            })
+                .populate('party', 'name')
+                .lean();
+
+            const relevantCharges = charges.filter((charge: any) => {
+                if (!charge.anchorDate) return false;
+                const chargeDate = new Date(charge.anchorDate);
+                const chargeYear = chargeDate.getFullYear();
+                const chargeMonth = chargeDate.getMonth() + 1;
+                return chargeYear === targetYear && quarterMonths[quarter as keyof typeof quarterMonths].includes(chargeMonth);
+            });
+
+            return { ok: true, data: toPlain(relevantCharges) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
     ipcMain.handle('charges:markChargesAsBilled', async (_e, args: { chargeIds: any[]; billId: string; billNumber: string }) => {
         try {
             await initMongo();
@@ -2362,57 +2407,6 @@ function registerIpcHandlers() {
         }
     });
 
-    ipcMain.handle('additionalDebits:create', async (_e, debitData: any) => {
-        try {
-            await initMongo();
-            validateEventFrame(_e.senderFrame);
-
-            if (!debitData.party || !debitData.periodType || !debitData.description || !debitData.amount || !debitData.debitDate) {
-                return { ok: false, error: 'Missing required additional debit fields' };
-            }
-
-            if (!['monthly', 'quarterly'].includes(debitData.periodType)) {
-                return { ok: false, error: 'Invalid period type' };
-            }
-
-            if (debitData.amount <= 0) {
-                return { ok: false, error: 'Amount must be greater than zero' };
-            }
-
-            const additionalDebit = new AdditionalDebit({
-                party: debitData.party,
-                periodType: debitData.periodType,
-                description: debitData.description.trim(),
-                amount: debitData.amount,
-                debitDate: new Date(debitData.debitDate),
-            });
-
-            await additionalDebit.save();
-            await additionalDebit.populate('party', 'name');
-
-            return { ok: true, data: toPlain(additionalDebit) };
-        } catch (e: any) {
-            return { ok: false, error: e.message };
-        }
-    });
-
-    ipcMain.handle('additionalDebits:delete', async (_e, id: string) => {
-        try {
-            await initMongo();
-            validateEventFrame(_e.senderFrame);
-
-            const additionalDebit = await AdditionalDebit.findById(id);
-            if (!additionalDebit) {
-                return { ok: false, error: 'Additional debit not found' };
-            }
-
-            await AdditionalDebit.findByIdAndDelete(id);
-            return { ok: true, data: { success: true } };
-        } catch (e: any) {
-            return { ok: false, error: e.message };
-        }
-    });
-
     ipcMain.handle('bills:getFinancialSummary', async (_e, params?: any) => {
         try {
             await initMongo();
@@ -2443,13 +2437,14 @@ function registerIpcHandlers() {
 
                 // Get payments for this party
                 const payments = await Payment.find({ party: party._id as any }).lean();
-                const additionalDebits = await AdditionalDebit.find({ party: party._id as any }).lean();
 
                 // Calculate totals
                 const totalBilled = bills.reduce((sum, bill) => sum + bill.amount, 0);
-                const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+                const billPayments = payments.filter((payment: any) => normalizePaymentFor(payment.paymentFor) === 'bill_payment');
+                const rentPayments = payments.filter((payment: any) => isRentPayment(payment.paymentFor));
+                const totalPaid = billPayments.reduce((sum, payment) => sum + payment.amount, 0);
                 const outstandingBalance = totalBilled - totalPaid;
-                const totalAdditionalDebits = additionalDebits.reduce((sum, debit) => sum + debit.amount, 0);
+                const totalRent = rentPayments.reduce((sum, payment) => sum + payment.amount, 0);
 
                 // Get charges for this party (for total charges calculation)
                 let totalCharges = 0;
@@ -2459,8 +2454,6 @@ function registerIpcHandlers() {
                 } catch (error) {
                     console.warn('Could not fetch charges for party:', party._id as any, error);
                 }
-                const netCharges = totalCharges - totalAdditionalDebits;
-
                 // Find latest dates
                 const lastBillDate = bills.length > 0
                     ? bills.sort((a, b) => new Date(b.billDate).getTime() - new Date(a.billDate).getTime())[0].billDate
@@ -2475,8 +2468,8 @@ function registerIpcHandlers() {
                         _id: (party._id as any).toString(),
                         name: party.name as any
                     },
-                    totalCharges: netCharges,
-                    totalAdditionalDebits,
+                    totalCharges,
+                    totalRent,
                     totalBilled,
                     totalPaid,
                     outstandingBalance,
@@ -2484,7 +2477,7 @@ function registerIpcHandlers() {
                     lastPaymentDate,
                     billCount: bills.length,
                     paymentCount: payments.length,
-                    additionalDebitCount: additionalDebits.length
+                    rentPaymentCount: rentPayments.length
                 });
             }
 
@@ -2499,6 +2492,7 @@ function registerIpcHandlers() {
         try {
             await initMongo();
             validateEventFrame(_e.senderFrame);
+            const middleware = new MongooseEncryptionMiddleware();
 
             const {
                 page = 1,
@@ -2544,6 +2538,11 @@ function registerIpcHandlers() {
 
 
 
+            for (const payment of payments) {
+                await middleware.decryptFields(payment, Payment.schema);
+                (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
+            }
+
             return {
                 ok: true,
                 data: {
@@ -2564,11 +2563,15 @@ function registerIpcHandlers() {
         try {
             await initMongo();
             validateEventFrame(_e.senderFrame);
+            const middleware = new MongooseEncryptionMiddleware();
 
             const payment = await Payment.findById(id).lean();
             if (!payment) {
                 return { ok: false, error: 'Payment not found' };
             }
+
+            await middleware.decryptFields(payment, Payment.schema);
+            (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
 
             return { ok: true, data: toPlain(payment) };
         } catch (e: any) {
@@ -2581,28 +2584,16 @@ function registerIpcHandlers() {
             await initMongo();
             validateEventFrame(_e.senderFrame);
 
-            // Validate required fields
-            if (!paymentData.paymentNumber || !paymentData.bill || !paymentData.party || !paymentData.amount || !paymentData.paymentMethod || !paymentData.paymentDate) {
+            const paymentFor = normalizePaymentFor(paymentData.paymentFor);
+
+            if (!paymentData.paymentNumber || !paymentData.party || !paymentData.amount || !paymentData.paymentMethod || !paymentData.paymentDate) {
                 return { ok: false, error: 'Missing required payment fields' };
             }
 
-            // Validate payment amount is positive
             if (paymentData.amount <= 0) {
                 return { ok: false, error: 'Payment amount must be greater than zero' };
             }
 
-            // Find the bill to validate payment amount
-            const bill = await Bill.findById(paymentData.bill);
-            if (!bill) {
-                return { ok: false, error: 'Bill not found' };
-            }
-
-            // Validate payment amount doesn't exceed outstanding amount
-            if (paymentData.amount > bill.outstandingAmount) {
-                return { ok: false, error: `Payment amount (₹${paymentData.amount}) exceeds outstanding amount (₹${bill.outstandingAmount})` };
-            }
-
-            // Validate payment date is not in future
             const paymentDate = new Date(paymentData.paymentDate);
             const today = new Date();
             today.setHours(23, 59, 59, 999);
@@ -2610,40 +2601,76 @@ function registerIpcHandlers() {
                 return { ok: false, error: 'Payment date cannot be in the future' };
             }
 
-            // Create the payment record
+            let bill = null;
+            if (paymentData.bill) {
+                bill = await Bill.findById(paymentData.bill);
+                if (!bill) {
+                    return { ok: false, error: 'Bill not found' };
+                }
+                if (bill.party.toString() !== paymentData.party) {
+                    return { ok: false, error: 'Selected bill does not belong to the selected party' };
+                }
+            }
+
+            if (paymentFor === 'bill_payment') {
+                if (!bill) {
+                    return { ok: false, error: 'Bill is required for bill payments' };
+                }
+
+                if (paymentData.amount > bill.outstandingAmount) {
+                    return { ok: false, error: `Payment amount (₹${paymentData.amount}) exceeds outstanding amount (₹${bill.outstandingAmount})` };
+                }
+            } else {
+                if (!paymentData.quarter || !paymentData.financialYear || !paymentData.description?.trim()) {
+                    return { ok: false, error: 'Quarter, financial year, and description are required for rent payments' };
+                }
+            }
+
             const payment = new Payment({
                 paymentNumber: paymentData.paymentNumber,
-                bill: bill._id,
+                paymentFor,
+                bill: bill?._id,
                 party: paymentData.party,
                 amount: paymentData.amount,
                 paymentMethod: paymentData.paymentMethod,
-                paymentDate: paymentDate,
+                paymentDate,
+                financialYear: paymentFor === 'rent' ? paymentData.financialYear : undefined,
+                quarter: paymentFor === 'rent' ? paymentData.quarter : undefined,
+                description: paymentFor === 'rent' ? paymentData.description?.trim() : undefined,
                 bankDetails: paymentData.bankDetails || undefined,
                 notes: paymentData.notes || undefined
             });
 
             await payment.save();
-
-            // Update bill status and amounts
-            const newPaidAmount = bill.paidAmount + paymentData.amount;
-            const newOutstandingAmount = bill.amount - newPaidAmount;
-
-            let newStatus = 'unpaid';
-            if (newOutstandingAmount === 0) {
-                newStatus = 'paid';
-            } else if (newPaidAmount > 0) {
-                newStatus = 'partial';
+            await payment.populate('party', 'name');
+            if (bill) {
+                await payment.populate('bill', 'billNumber');
             }
+            const middleware = new MongooseEncryptionMiddleware();
+            await middleware.decryptFields(payment, Payment.schema);
+            (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
 
-            await Bill.findByIdAndUpdate(
-                bill._id,
-                {
-                    paidAmount: newPaidAmount,
-                    outstandingAmount: newOutstandingAmount,
-                    status: newStatus
-                },
-                { new: true }
-            );
+            if (paymentFor === 'bill_payment' && bill) {
+                const newPaidAmount = bill.paidAmount + paymentData.amount;
+                const newOutstandingAmount = bill.amount - newPaidAmount;
+
+                let newStatus = 'unpaid';
+                if (newOutstandingAmount === 0) {
+                    newStatus = 'paid';
+                } else if (newPaidAmount > 0) {
+                    newStatus = 'partial';
+                }
+
+                await Bill.findByIdAndUpdate(
+                    bill._id,
+                    {
+                        paidAmount: newPaidAmount,
+                        outstandingAmount: newOutstandingAmount,
+                        status: newStatus
+                    },
+                    { new: true }
+                );
+            }
 
             return { ok: true, data: toPlain(payment) };
         } catch (e: any) {
@@ -2679,8 +2706,9 @@ function registerIpcHandlers() {
                 }
             }
 
-            // If amount is being changed, we need to update the related bill
-            if (updates.amount !== undefined && updates.amount !== existingPayment.amount) {
+            const existingPaymentFor = normalizePaymentFor((existingPayment as any).paymentFor);
+
+            if (existingPaymentFor === 'bill_payment' && updates.amount !== undefined && updates.amount !== existingPayment.amount) {
                 const bill = await Bill.findById(existingPayment.bill);
                 if (!bill) {
                     return { ok: false, error: 'Associated bill not found' };
@@ -2714,6 +2742,10 @@ function registerIpcHandlers() {
                     { new: true }
                 );
 
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(updatedPayment, Payment.schema);
+                (updatedPayment as any).paymentFor = normalizePaymentFor((updatedPayment as any).paymentFor);
+
                 // Update the bill
                 await Bill.findByIdAndUpdate(
                     bill._id,
@@ -2740,6 +2772,10 @@ function registerIpcHandlers() {
                     return { ok: false, error: 'Failed to update payment' };
                 }
 
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(updatedPayment, Payment.schema);
+                (updatedPayment as any).paymentFor = normalizePaymentFor((updatedPayment as any).paymentFor);
+
                 return { ok: true, data: toPlain(updatedPayment) };
             }
         } catch (e: any) {
@@ -2758,36 +2794,35 @@ function registerIpcHandlers() {
                 return { ok: false, error: 'Payment not found' };
             }
 
-            // Find the associated bill
-            const bill = await Bill.findById(payment.bill);
-            if (!bill) {
-                return { ok: false, error: 'Associated bill not found' };
-            }
-
-            // Calculate new bill amounts after removing this payment
-            const newPaidAmount = bill.paidAmount - payment.amount;
-            const newOutstandingAmount = bill.amount - newPaidAmount;
-
-            // Determine new bill status
-            let newStatus = 'unpaid';
-            if (newOutstandingAmount === 0) {
-                newStatus = 'paid';
-            } else if (newPaidAmount > 0) {
-                newStatus = 'partial';
-            }
-
-            // Delete the payment
-            await Payment.findByIdAndDelete(id);
-
-            // Update the bill
-            await Bill.findByIdAndUpdate(
-                bill._id,
-                {
-                    paidAmount: newPaidAmount,
-                    outstandingAmount: newOutstandingAmount,
-                    status: newStatus
+            const paymentFor = normalizePaymentFor((payment as any).paymentFor);
+            if (paymentFor === 'bill_payment') {
+                const bill = await Bill.findById(payment.bill);
+                if (!bill) {
+                    return { ok: false, error: 'Associated bill not found' };
                 }
-            );
+
+                const newPaidAmount = bill.paidAmount - payment.amount;
+                const newOutstandingAmount = bill.amount - newPaidAmount;
+
+                let newStatus = 'unpaid';
+                if (newOutstandingAmount === 0) {
+                    newStatus = 'paid';
+                } else if (newPaidAmount > 0) {
+                    newStatus = 'partial';
+                }
+
+                await Payment.findByIdAndDelete(id);
+                await Bill.findByIdAndUpdate(
+                    bill._id,
+                    {
+                        paidAmount: newPaidAmount,
+                        outstandingAmount: newOutstandingAmount,
+                        status: newStatus
+                    }
+                );
+            } else {
+                await Payment.findByIdAndDelete(id);
+            }
 
             return { ok: true, data: { success: true } };
         } catch (e: any) {
@@ -2833,23 +2868,14 @@ function registerIpcHandlers() {
 
             const payments = await Payment.find(paymentQuery)
                 .populate('party', 'name')
-                .populate('bill', 'billNumber')
+                .populate('bill', 'billNumber quarter year billDate')
                 .sort({ paymentDate: -1 })
                 .lean();
 
-            const additionalDebitQuery: any = { party: new mongoose.Types.ObjectId(partyId) };
-            if (Object.keys(dateFilter).length > 0) {
-                additionalDebitQuery.debitDate = dateFilter;
+            const middleware = new MongooseEncryptionMiddleware();
+            for (const payment of payments) {
+                await middleware.decryptFields(payment, Payment.schema);
             }
-
-            const additionalDebits = await AdditionalDebit.find(additionalDebitQuery)
-                .populate('party', 'name')
-                .sort({ debitDate: -1 })
-                .lean();
-
-
-
-
 
             // Combine and format the history items
             const historyItems: any[] = [];
@@ -2862,34 +2888,42 @@ function registerIpcHandlers() {
                     date: bill.billDate,
                     amount: bill.amount,
                     description: `Bill for ${bill.quarter} ${bill.year}-${(bill.year + 1).toString().slice(-2)}`,
+                    quarter: bill.quarter,
+                    financialYear: bill.year,
                     billNumber: bill.billNumber,
+                    billDate: bill.billDate,
+                    billQuarter: bill.quarter,
+                    billYear: bill.year,
                     runningBalance: 0 // Will be calculated below
                 });
             });
 
             // Add payments to history
             payments.forEach((payment: any) => {
+                const paymentFor = normalizePaymentFor(payment.paymentFor);
                 historyItems.push({
                     _id: payment._id.toString(),
                     type: 'payment',
                     date: payment.paymentDate,
                     amount: payment.amount,
-                    description: `Payment for Bill ${payment.bill?.billNumber.split('|')[1] + ' - ' + payment.bill?.billNumber.split('|')[2]}`,
+                    description: paymentFor === 'rent'
+                        ? (payment.description?.trim() || payment.notes?.trim() || 'Rent')
+                        : payment.notes?.trim()
+                        ? payment.notes.trim()
+                        : `Payment for Bill ${payment.bill?.billNumber || ''}`.trim(),
+                    quarter: paymentFor === 'rent' ? payment.quarter : payment.bill?.quarter,
+                    financialYear: paymentFor === 'rent' ? payment.financialYear : payment.bill?.year,
+                    billId: payment.bill?._id?.toString(),
+                    billNumber: payment.bill?.billNumber,
+                    billDate: payment.bill?.billDate,
+                    billQuarter: payment.bill?.quarter,
+                    billYear: payment.bill?.year,
                     paymentNumber: payment.paymentNumber,
+                    paymentFor,
                     paymentMethod: payment.paymentMethod,
+                    bankDetails: payment.bankDetails,
+                    notes: payment.notes,
                     runningBalance: 0 // Will be calculated below
-                });
-            });
-
-            additionalDebits.forEach((debit: any) => {
-                historyItems.push({
-                    _id: debit._id.toString(),
-                    type: 'additional_debit',
-                    date: debit.debitDate,
-                    amount: debit.amount,
-                    description: debit.description,
-                    periodType: debit.periodType,
-                    runningBalance: 0
                 });
             });
 
@@ -2902,7 +2936,6 @@ function registerIpcHandlers() {
                 if (a.type !== b.type) {
                     const typeOrder: Record<string, number> = {
                         bill: 0,
-                        additional_debit: 1,
                         payment: 2,
                     };
                     return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
@@ -2917,7 +2950,7 @@ function registerIpcHandlers() {
             historyItems.forEach(item => {
                 if (item.type === 'bill') {
                     runningBalance += item.amount;
-                } else {
+                } else if (item.type === 'payment' && item.paymentFor !== 'rent') {
                     runningBalance -= item.amount;
                 }
                 item.runningBalance = runningBalance;
@@ -2932,7 +2965,6 @@ function registerIpcHandlers() {
                 if (a.type !== b.type) {
                     const typeOrder: Record<string, number> = {
                         payment: 0,
-                        additional_debit: 1,
                         bill: 2,
                     };
                     return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);

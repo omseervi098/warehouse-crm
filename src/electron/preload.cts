@@ -179,6 +179,7 @@ contextBridge.exposeInMainWorld('electron', {
         getByPartyPaginated: async (partyId: string, options?: any) => ipcRenderer.invoke('charges:getByPartyPaginated', { partyId, options }),
         getAllPartiesPaginated: async (options?: any) => ipcRenderer.invoke('charges:getAllPartiesPaginated', options),
         getUnbilledCharges: async (partyId: string, quarter: string, year: number) => ipcRenderer.invoke('charges:getUnbilledCharges', { partyId, quarter, year }),
+        getQuarterCharges: async (partyId: string, quarter: string, year: number) => ipcRenderer.invoke('charges:getQuarterCharges', { partyId, quarter, year }),
         markChargesAsBilled: async (chargeIds: any[], billId: string, billNumber: string) => ipcRenderer.invoke('charges:markChargesAsBilled', { chargeIds, billId, billNumber }),
         validateChargesForBilling: async (chargeIds: any[]) => ipcRenderer.invoke('charges:validateChargesForBilling', chargeIds),
     },
@@ -190,10 +191,6 @@ contextBridge.exposeInMainWorld('electron', {
         delete: async (id: string) => ipcRenderer.invoke('bills:delete', id),
         generatePdf: async (id: string) => ipcRenderer.invoke('bills:generatePdf', id),
         getFinancialSummary: async (params?: any) => ipcRenderer.invoke('bills:getFinancialSummary', params),
-    },
-    additionalDebits: {
-        create: async (debitData: any) => ipcRenderer.invoke('additionalDebits:create', debitData),
-        delete: async (id: string) => ipcRenderer.invoke('additionalDebits:delete', id),
     },
     payments: {
         getAll: async (params?: any) => ipcRenderer.invoke('payments:getAll', params),

@@ -1,4 +1,3 @@
-import AdditionalDebitModal from '../components/billing/AdditionalDebitModal';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import BillingHistoryModal from '../components/billing/BillingHistoryModal';
 import BillModal from '../components/billing/BillModal';
@@ -10,7 +9,7 @@ import { SortIndicator } from '../components/common/Table';
 import { useAppContext } from '../contexts/AppContext';
 import { useNotify } from '../hooks/useNotify';
 import { useTheme } from '../hooks/useTheme';
-import { AdditionalDebit, Bill, Party, Payment } from '../types';
+import { Bill, Party, Payment } from '../types';
 
 const BillingPage: React.FC = () => {
     const { theme } = useTheme();
@@ -19,9 +18,7 @@ const BillingPage: React.FC = () => {
         financialSummaries,
         loadingFinancialSummaries,
         errorFinancialSummaries,
-        fetchFinancialSummaries,
-        addBill,
-        addPayment
+        fetchFinancialSummaries
     } = useAppContext();
     const notify = useNotify();
 
@@ -31,7 +28,6 @@ const BillingPage: React.FC = () => {
 
     // Modal state
     const [isBillModalOpen, setIsBillModalOpen] = useState(false);
-    const [isAdditionalDebitModalOpen, setIsAdditionalDebitModalOpen] = useState(false);
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [isBillingHistoryModalOpen, setIsBillingHistoryModalOpen] = useState(false);
     const [selectedPartyId, setSelectedPartyId] = useState<string>('');
@@ -106,11 +102,6 @@ const BillingPage: React.FC = () => {
         setIsPaymentModalOpen(true);
     }, []);
 
-    const handleAddAdditionalDebit = useCallback((partyId: string) => {
-        setSelectedPartyId(partyId);
-        setIsAdditionalDebitModalOpen(true);
-    }, []);
-
     const handleViewHistory = useCallback((partyId: string) => {
         const party = parties.find(p => p._id === partyId);
         if (party) {
@@ -141,23 +132,11 @@ const BillingPage: React.FC = () => {
 
         notify({
             type: 'success',
-            message: `Payment ${payment.paymentNumber} recorded successfully`
+            message: `${payment.paymentFor === 'rent' ? 'Rent' : 'Payment'} ${payment.paymentNumber} recorded successfully`
         });
 
         // Close the modal
         setIsPaymentModalOpen(false);
-        setSelectedPartyId('');
-    }, [notify, fetchFinancialSummaries]);
-
-    const handleAdditionalDebitCreated = useCallback((debit: AdditionalDebit) => {
-        fetchFinancialSummaries();
-
-        notify({
-            type: 'success',
-            message: `Additional debit added for ${debit.party.name}`
-        });
-
-        setIsAdditionalDebitModalOpen(false);
         setSelectedPartyId('');
     }, [notify, fetchFinancialSummaries]);
 
@@ -169,11 +148,6 @@ const BillingPage: React.FC = () => {
 
     const handleClosePaymentModal = useCallback(() => {
         setIsPaymentModalOpen(false);
-        setSelectedPartyId('');
-    }, []);
-
-    const handleCloseAdditionalDebitModal = useCallback(() => {
-        setIsAdditionalDebitModalOpen(false);
         setSelectedPartyId('');
     }, []);
 
@@ -326,13 +300,6 @@ const BillingPage: React.FC = () => {
                                                 <Button
                                                     variant="secondary"
                                                     size="sm"
-                                                    onClick={() => handleAddAdditionalDebit(String(summary.party._id))}
-                                                >
-                                                    Additional Debit
-                                                </Button>
-                                                <Button
-                                                    variant="secondary"
-                                                    size="sm"
                                                     onClick={() => handleAddPayment(String(summary.party._id))}
                                                 >
                                                     Add Payment
@@ -381,14 +348,6 @@ const BillingPage: React.FC = () => {
                 isOpen={isPaymentModalOpen}
                 onClose={handleClosePaymentModal}
                 onPaymentCreated={handlePaymentCreated}
-                parties={parties}
-                preSelectedPartyId={selectedPartyId}
-            />
-
-            <AdditionalDebitModal
-                isOpen={isAdditionalDebitModalOpen}
-                onClose={handleCloseAdditionalDebitModal}
-                onCreated={handleAdditionalDebitCreated}
                 parties={parties}
                 preSelectedPartyId={selectedPartyId}
             />

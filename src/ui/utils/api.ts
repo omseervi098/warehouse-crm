@@ -104,6 +104,8 @@ export const chargesApi = {
   // Billing integration methods
   getUnbilledCharges: (partyId: string, quarter: string, year: number) =>
     ipcCall((window.electron.charges as any).getUnbilledCharges(partyId, quarter, year)),
+  getQuarterCharges: (partyId: string, quarter: string, year: number) =>
+    ipcCall((window.electron.charges as any).getQuarterCharges(partyId, quarter, year)),
   markChargesAsBilled: (chargeIds: string[], billId: string, billNumber: string) =>
     ipcCall((window.electron.charges as any).markChargesAsBilled(chargeIds, billId, billNumber)),
   validateChargesForBilling: (chargeIds: string[]) =>
@@ -142,11 +144,6 @@ export const billsApi = {
   getFinancialSummary: (params?: {
     partyId?: string;
   }) => ipcCall(window.electron.bills.getFinancialSummary(params)),
-};
-
-export const additionalDebitsApi = {
-  create: (debitData: any) => ipcCall(window.electron.additionalDebits.create(debitData)),
-  delete: (id: string) => ipcCall(window.electron.additionalDebits.delete(id)),
 };
 
 // Payments API

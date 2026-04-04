@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNotify } from '../../hooks/useNotify';
 import { useTheme } from '../../hooks/useTheme';
 import { BillingHistoryItem, Party } from '../../types';
-import { additionalDebitsApi, billsApi, paymentsApi } from '../../utils/api';
+import { billsApi, paymentsApi } from '../../utils/api';
 import { downloadBillPdf, downloadBillingHistoryPdf } from '../../utils/exportpdf';
 import Button from '../common/Button';
 import Modal from '../common/Modal';
@@ -16,7 +16,7 @@ interface BillingHistoryModalProps {
 interface FilterOptions {
     startDate: string;
     endDate: string;
-    transactionType: 'all' | 'bills' | 'payments' | 'additional_debits';
+    transactionType: 'all' | 'bills' | 'payments' | 'rent';
 }
 
 const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
@@ -116,9 +116,9 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
             if (filters.transactionType === 'bills') {
                 filtered = filtered.filter(item => item.type === 'bill');
             } else if (filters.transactionType === 'payments') {
-                filtered = filtered.filter(item => item.type === 'payment');
-            } else if (filters.transactionType === 'additional_debits') {
-                filtered = filtered.filter(item => item.type === 'additional_debit');
+                filtered = filtered.filter(item => item.type === 'payment' && item.paymentFor !== 'rent');
+            } else if (filters.transactionType === 'rent') {
+                filtered = filtered.filter(item => item.type === 'payment' && item.paymentFor === 'rent');
             }
 
         }
@@ -133,7 +133,6 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
             if (a.type !== b.type) {
                 const typeOrder: Record<string, number> = {
                     payment: 0,
-                    additional_debit: 1,
                     bill: 2
                 };
                 return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
@@ -165,7 +164,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
 
         setExporting(true);
         try {
-            await downloadBillingHistoryPdf(party.name, filteredItems, filters);
+            await downloadBillingHistoryPdf(party, filteredItems, filters);
             notify({
                 type: 'success',
                 message: 'Billing history exported successfully'
@@ -215,14 +214,12 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
         try {
             if (item.type === 'bill') {
                 await billsApi.delete(item._id);
-            } else if (item.type === 'additional_debit') {
-                await additionalDebitsApi.delete(item._id);
             } else {
                 await paymentsApi.delete(item._id);
             }
             notify({
                 type: 'success',
-                message: `${item.type === 'bill' ? 'Bill' : item.type === 'payment' ? 'Payment' : 'Additional debit'} deleted successfully`
+                message: `${item.type === 'bill' ? 'Bill' : item.paymentFor === 'rent' ? 'Rent payment' : 'Payment'} deleted successfully`
             });
             handleRefresh();
         } catch (error: any) {
@@ -246,11 +243,15 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
     }, []);
 
     // Get transaction type badge
-    const getTransactionTypeBadge = useCallback((type: string) => {
+    const getTransactionTypeBadge = useCallback((item: BillingHistoryItem) => {
         const baseClasses = "px-2 py-1 text-xs font-medium rounded-full";
-        if (type === 'bill') {
+        if (item.type === 'bill') {
             return `${baseClasses} bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200`;
-        } else if (type === 'payment') {
+        }
+        if (item.paymentFor === 'rent') {
+            return `${baseClasses} bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200`;
+        }
+        if (item.type === 'payment') {
             return `${baseClasses} bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200`;
         }
         return `${baseClasses} bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200`;
@@ -350,7 +351,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                                 <option value="all">All Transactions</option>
                                 <option value="bills">Bills Only</option>
                                 <option value="payments">Payments Only</option>
-                                <option value="additional_debits">Additional Debits Only</option>
+                                <option value="rent">Rent Only</option>
                             </select>
                         </div>
                     </div>
@@ -378,7 +379,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                             </div>
                             <div>
                                 <div className={`text-2xl font-bold ${theme.text.primary}`}>
-                                    {filteredItems.filter(item => item.type === 'payment').length}
+                                    {filteredItems.filter(item => item.type === 'payment' && item.paymentFor !== 'rent').length}
                                 </div>
                                 <div className={`text-sm ${theme.text.secondary}`}>
                                     Payments Received
@@ -386,10 +387,10 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                             </div>
                             <div>
                                 <div className={`text-2xl font-bold ${theme.text.primary}`}>
-                                    {filteredItems.filter(item => item.type === 'additional_debit').length}
+                                    {filteredItems.filter(item => item.type === 'payment' && item.paymentFor === 'rent').length}
                                 </div>
                                 <div className={`text-sm ${theme.text.secondary}`}>
-                                    Additional Debits
+                                    Rent Payments
                                 </div>
                             </div>
                         </div>
@@ -427,15 +428,13 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                                     <div className="flex items-center justify-between">
                                         <div className="flex-1">
                                             <div className="flex items-center space-x-3 mb-1">
-                                                <span className={getTransactionTypeBadge(item.type)}>
-                                                    {item.type === 'additional_debit' ? 'ADDITIONAL DEBIT' : item.type.toUpperCase()}
+                                                <span className={getTransactionTypeBadge(item)}>
+                                                    {item.type === 'payment' && item.paymentFor === 'rent' ? 'RENT' : item.type.toUpperCase()}
                                                 </span>
                                                 <span className={`text-lg font-bold ${theme.text.primary} flex items-center`}>
                                                     {item.type === 'bill' && item.billNumber
                                                         ? (item.billNumber.split('|').length === 3 ? item.billNumber.split('|')[2] : item.billNumber)
-                                                        : item.type === 'payment'
-                                                            ? item.paymentNumber
-                                                            : item.periodType === 'quarterly' ? 'QTR' : 'MTH'}
+                                                        : item.paymentNumber || item.quarter || 'RENT'}
                                                 </span>
                                                 <div className="flex items-center space-x-1 border-l pl-2 border-gray-200 dark:border-gray-700">
                                                     {item.type === 'bill' && (
@@ -452,7 +451,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                                                     <button
                                                         onClick={(e) => handleDelete(e, item)}
                                                         className="p-1.5 text-red-600 hover:text-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-full transition-colors"
-                                                        title={`Delete ${item.type === 'bill' ? 'Bill' : item.type === 'payment' ? 'Payment' : 'Additional Debit'}`}
+                                                        title={`Delete ${item.type === 'bill' ? 'Bill' : item.paymentFor === 'rent' ? 'Rent Payment' : 'Payment'}`}
                                                     >
                                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -472,9 +471,9 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                                                     Payment Method: {getPaymentMethodDisplay(item.paymentMethod)}
                                                 </div>
                                             )}
-                                            {item.type === 'additional_debit' && item.periodType && (
+                                            {item.type === 'payment' && item.paymentFor === 'rent' && item.quarter && item.financialYear && (
                                                 <div className={`text-xs ${theme.text.muted}`}>
-                                                    Period: {item.periodType === 'quarterly' ? 'Quarterly' : 'Monthly'}
+                                                    Period: {item.quarter} {item.financialYear}
                                                 </div>
                                             )}
                                         </div>
@@ -482,7 +481,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
                                         <div className="text-right">
                                             <div className={`text-lg font-semibold ${item.type === 'bill'
                                                 ? 'text-red-600 dark:text-red-400'
-                                                : item.type === 'payment'
+                                                : item.type === 'payment' && item.paymentFor !== 'rent'
                                                     ? 'text-green-600 dark:text-green-400'
                                                     : 'text-amber-600 dark:text-amber-400'
                                                 }`}>

@@ -393,29 +393,20 @@ export interface Bill {
 export interface Payment {
   _id: string;
   paymentNumber: string;      // Auto-generated unique identifier
-  bill: Pick<Bill, '_id' | 'billNumber'>;
+  paymentFor: 'bill_payment' | 'rent';
+  bill?: Pick<Bill, '_id' | 'billNumber'>;
   party: Pick<Party, '_id' | 'name'>;
   amount: number;
-  paymentMethod: 'cash' | 'cheque' | 'ecs' | 'bank_transfer';
+  paymentMethod: 'cash' | 'bank';
   paymentDate: string;        // ISO date string
+  financialYear?: number;
+  quarter?: 'Q1' | 'Q2' | 'Q3' | 'Q4';
+  description?: string;
   bankDetails?: {
     bankName?: string;
     accountNumber?: string;
-    chequeNumber?: string;
-    transactionId?: string;
   };
   notes?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AdditionalDebit {
-  _id: string;
-  party: Pick<Party, '_id' | 'name'>;
-  periodType: 'monthly' | 'quarterly';
-  description: string;
-  amount: number;
-  debitDate: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -423,7 +414,7 @@ export interface AdditionalDebit {
 export interface PartyFinancialSummary {
   party: Pick<Party, '_id' | 'name'>;
   totalCharges: number;       // From charges system
-  totalAdditionalDebits?: number;
+  totalRent?: number;
   totalBilled: number;        // Sum of all bills
   totalPaid: number;          // Sum of all payments
   outstandingBalance: number; // totalBilled - totalPaid
@@ -431,19 +422,30 @@ export interface PartyFinancialSummary {
   lastPaymentDate?: string;
   billCount: number;
   paymentCount: number;
-  additionalDebitCount?: number;
+  rentPaymentCount?: number;
 }
 
 export interface BillingHistoryItem {
   _id: string;
-  type: 'bill' | 'payment' | 'additional_debit';
+  type: 'bill' | 'payment';
   date: string;
   amount: number;
   description: string;
+  quarter?: 'Q1' | 'Q2' | 'Q3' | 'Q4';
+  financialYear?: number;
   billNumber?: string;
+  billId?: string;
+  billDate?: string;
+  billQuarter?: 'Q1' | 'Q2' | 'Q3' | 'Q4';
+  billYear?: number;
   paymentNumber?: string;
+  paymentFor?: 'bill_payment' | 'rent';
   paymentMethod?: string;
-  periodType?: 'monthly' | 'quarterly';
+  bankDetails?: {
+    bankName?: string;
+    accountNumber?: string;
+  };
+  notes?: string;
   runningBalance: number;
 }
 
@@ -559,6 +561,7 @@ declare global {
         cleanupOrphaned: () => Promise<{ ok: boolean; data?: number; error?: string }>;
         getByParty: (partyId: string) => Promise<{ ok: boolean; data?: Charge[]; error?: string }>;
         getUnbilledCharges: (partyId: string, quarter: string, year: number) => Promise<{ ok: boolean; data?: Charge[]; error?: string }>;
+        getQuarterCharges: (partyId: string, quarter: string, year: number) => Promise<{ ok: boolean; data?: Charge[]; error?: string }>;
         markChargesAsBilled: (chargeIds: string[], billId: string, billNumber: string) => Promise<{ ok: boolean; data?: boolean; error?: string }>;
         validateChargesForBilling: (chargeIds: string[]) => Promise<{ ok: boolean; data?: { valid: boolean; errors?: string[] }; error?: string }>;
       };
@@ -581,10 +584,6 @@ declare global {
         getFinancialSummary: (params?: {
           partyId?: string;
         }) => Promise<{ ok: boolean; data?: PartyFinancialSummary[]; error?: string }>;
-      };
-      additionalDebits: {
-        create: (debitData: any) => Promise<{ ok: boolean; data?: AdditionalDebit; error?: string }>;
-        delete: (id: string) => Promise<{ ok: boolean; data?: { success: boolean }; error?: string }>;
       };
       payments: {
         getAll: (params?: {

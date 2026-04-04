@@ -74,7 +74,7 @@ const Modal: React.FC<ModalProps> = ({
         ref={modalRef}
         className={`
           ${theme.bg.card} rounded-xl shadow-2xl w-full ${sizeClasses}
-          transform transition-all duration-200 ease-out
+          transform transition-transform duration-200 ease-out
           flex flex-col max-h-[90vh] max-w-[calc(100vw-2rem)]
           border ${theme.border.primary}
         `}
