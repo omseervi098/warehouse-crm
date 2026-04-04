@@ -14,12 +14,13 @@ interface NavItemProps {
   icon: React.ReactNode;
   label: string;
   isExpanded: boolean;
+  isCompact?: boolean;
 }
 
-const NavItem: React.FC<NavItemProps> = ({ to, icon, label, isExpanded }) => (
+const NavItem: React.FC<NavItemProps> = ({ to, icon, label, isExpanded, isCompact = false }) => (
   <NavLink
     to={to}
-    className={({ isActive }) => `${commonLinkClasses} ${isActive ? activeLinkClasses : ''} ${!isExpanded ? 'justify-center' : ''}`}
+    className={({ isActive }) => `${commonLinkClasses} ${isCompact ? 'py-2.5' : ''} ${isActive ? activeLinkClasses : ''} ${!isExpanded ? 'justify-center' : ''}`}
     title={isExpanded ? undefined : label}
   >
     <span className={`h-5 w-5 shrink-0 ${isExpanded ? 'mr-3' : 'mr-0'}`}>{icon}</span>
@@ -30,9 +31,10 @@ const NavItem: React.FC<NavItemProps> = ({ to, icon, label, isExpanded }) => (
 interface SidebarProps {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
+  isMacOS?: boolean;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen, isMacOS = false }) => {
   // Simple SVG icons
   const DashboardIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-full w-full" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>;
   const ProfileIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-full w-full" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>;
@@ -56,12 +58,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {
             ${isOpen ? 'w-64' : 'w-0 md:w-20'}
             ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
             border-r border-white/10
+            ${isMacOS ? 'macos-sidebar' : ''}
         `}>
-        <div className="flex flex-col flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="flex min-h-0 flex-col flex-1 overflow-hidden">
           {/* Header */}
-          <div className={`flex items-center justify-between h-20 shrink-0 border-b border-white/10 ${isOpen ? 'px-4' : 'md:px-0 md:justify-center'}`}>
+          <div className={`flex items-center justify-between h-20 shrink-0 border-b border-white/10 ${isOpen ? 'px-4' : 'md:px-0 md:justify-center'} ${isMacOS ? 'macos-sidebar-header' : ''}`}>
             <h1 className={`text-xl md:text-xl font-bold tracking-wider text-white whitespace-nowrap flex items-center gap-2`}>
-              <img src={Icon} alt="Logo" className="h-10 w-10" />
+              <img src={Icon} alt="Logo" className={`h-10 w-10 ${isMacOS ? 'rounded-xl bg-white/5 p-1' : ''}`} />
               {/* @ts-ignore */}
               <span className='text-lg'>{isOpen && (import.meta.env.VITE_APP_NAME || "Warehouse CRM")}</span>
             </h1>
@@ -71,24 +74,24 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, setIsOpen }) => {
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 px-2 py-4 space-y-1">
-            <NavItem to="/dashboard" icon={<DashboardIcon />} label="Dashboard" isExpanded={isOpen} />
-            <NavItem to="/company-profile" icon={<ProfileIcon />} label="Company Profile" isExpanded={isOpen} />
-            <NavItem to="/master-data" icon={<ItemIcon />} label="Master Data" isExpanded={isOpen} />
-            <NavItem to="/parties" icon={<PartyIcon />} label="Parties" isExpanded={isOpen} />
-            <NavItem to="/stock-management/entries" icon={<BetweenHorizontalEndIcon size={20} />} label="Stock Entries" isExpanded={isOpen} />
-            <NavItem to="/stock-statements/balance" icon={<Warehouse size={20} />} label="Stock Balance" isExpanded={isOpen} />
-            <NavItem to="/warehouse-charges" icon={<IndianRupee size={20} />} label="Warehouse Charges" isExpanded={isOpen} />
-            <NavItem to="/billing" icon={<ReceiptText size={20} />} label="Billing" isExpanded={isOpen} />
-            <NavItem to="/settings" icon={<SettingsIcon />} label="Settings" isExpanded={isOpen} />
+          <nav className={`flex-1 min-h-0 overflow-y-auto px-2 py-4 space-y-1 ${isMacOS ? 'macos-sidebar-nav' : ''}`}>
+            <NavItem to="/dashboard" icon={<DashboardIcon />} label="Dashboard" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/company-profile" icon={<ProfileIcon />} label="Company Profile" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/master-data" icon={<ItemIcon />} label="Master Data" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/parties" icon={<PartyIcon />} label="Parties" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/stock-management/entries" icon={<BetweenHorizontalEndIcon size={20} />} label="Stock Entries" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/stock-statements/balance" icon={<Warehouse size={20} />} label="Stock Balance" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/warehouse-charges" icon={<IndianRupee size={20} />} label="Warehouse Charges" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/billing" icon={<ReceiptText size={20} />} label="Billing" isExpanded={isOpen} isCompact={isMacOS} />
+            <NavItem to="/settings" icon={<SettingsIcon />} label="Settings" isExpanded={isOpen} isCompact={isMacOS} />
           </nav>
 
           {/* Footer Toggle */}
-          <div className={`mx-auto ${isOpen ? 'w-64' : ''}  border-t border-white/10 pt-2`}>
+          <div className={`w-full shrink-0 border-t border-white/10 px-2 pt-2 ${isMacOS ? 'macos-sidebar-footer' : ''}`}>
             <DarkModeToggle isExpanded={isOpen} />
             <button
               onClick={() => setIsOpen(!isOpen)}
-              className={`hidden md:flex items-center w-full px-4 py-2 text-slate-300 hover:text-white hover:bg-white/10 transition-colors ${!isOpen && 'justify-center'} hover:rounded-md`}
+              className={`hidden md:flex items-center w-full px-4 py-2 text-slate-300 hover:text-white hover:bg-white/10 transition-colors hover:rounded-md ${!isOpen ? 'justify-center h-11 w-11 mx-auto px-0 py-0 rounded-lg' : ''}`}
               title={isOpen ? "Collapse Sidebar" : "Expand Sidebar"}
             >
               <div className="h-6 w-6 shrink-0">{isOpen ? <CollapseIcon /> : <ExpandIcon />}</div>

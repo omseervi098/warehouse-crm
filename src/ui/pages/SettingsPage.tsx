@@ -96,6 +96,11 @@ const SettingsPage: React.FC = () => {
   const [backupFreq, setBackupFreq] = useState('never');
   const [backupDir, setBackupDir] = useState('');
   const [settingBackup, setSettingBackup] = useState(false);
+  const [runningBackup, setRunningBackup] = useState(false);
+  const [backupLastRunAt, setBackupLastRunAt] = useState<string | null>(null);
+  const [backupLastSuccessAt, setBackupLastSuccessAt] = useState<string | null>(null);
+  const [backupLastError, setBackupLastError] = useState<string | null>(null);
+  const [backupLastPath, setBackupLastPath] = useState<string | null>(null);
 
   const selectedNames = useMemo(() => Object.keys(selected).filter(k => selected[k]), [selected]);
 
@@ -621,8 +626,16 @@ const SettingsPage: React.FC = () => {
          setHasBackupConfig(true);
          setBackupFreq(res.data.frequency || 'never');
          setBackupDir(res.data.directory || '');
+         setBackupLastRunAt(res.data.lastRunAt || null);
+         setBackupLastSuccessAt(res.data.lastSuccessAt || null);
+         setBackupLastError(res.data.lastError || null);
+         setBackupLastPath(res.data.lastBackupPath || null);
       } else {
          setHasBackupConfig(false);
+         setBackupLastRunAt(null);
+         setBackupLastSuccessAt(null);
+         setBackupLastError(null);
+         setBackupLastPath(null);
       }
     } catch (e) {
       console.error(e);
@@ -652,13 +665,48 @@ const SettingsPage: React.FC = () => {
           frequency: backupFreq
        });
        if(res?.ok) {
-          toast.success('Local auto-backup configuration saved!');
+          toast.success(backupFreq === 'never'
+            ? 'Backup configuration saved. Automatic backups are disabled.'
+            : 'Backup configuration saved. Automatic backups will run only while the app is open.');
           await loadBackupStatus();
        } else {
           toast.error(res?.error || 'Failed to save configuration');
        }
-     } catch (e: any) { toast.error(e?.message); }
-     setSettingBackup(false);
+     } catch (e: any) {
+       toast.error(e?.message || 'Failed to save configuration');
+     } finally {
+       setSettingBackup(false);
+     }
+  };
+
+  const handleRunBackupNow = async () => {
+    if (!hasBackupConfig || !backupDir.trim()) {
+      toast.error('Save a backup directory first.');
+      return;
+    }
+    setRunningBackup(true);
+    try {
+      const res = await window.electron?.autobackup?.triggerBackup?.();
+      if (res?.ok && res.data) {
+        toast.success(`Backup created: ${res.data}`);
+        await loadBackupStatus();
+      } else {
+        toast.error(res?.error || 'Backup failed');
+        await loadBackupStatus();
+      }
+    } catch (e: any) {
+      toast.error(e?.message || 'Backup failed');
+      await loadBackupStatus();
+    } finally {
+      setRunningBackup(false);
+    }
+  };
+
+  const formatBackupTime = (value: string | null) => {
+    if (!value) return 'Never';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString();
   };
 
   useEffect(() => {
@@ -1335,7 +1383,7 @@ const SettingsPage: React.FC = () => {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-medium">Auto-Backup to Local File System</h2>
-            <p className="text-sm text-theme-secondary">Configure automated background backups to a secure directory on your computer.</p>
+            <p className="text-sm text-theme-secondary">Configure local backups for this device. Automatic backups run only while the app is open.</p>
           </div>
           <span className={`text-xs px-2 py-1 rounded ${hasBackupConfig && backupFreq !== 'never' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
             {backupLoading ? 'Checking…' : (hasBackupConfig && backupFreq !== 'never') ? 'Active' : 'Disabled'}
@@ -1350,10 +1398,36 @@ const SettingsPage: React.FC = () => {
                   <span className="text-sm font-medium text-green-400">Backups Active</span>
                 </div>
                 <p className="text-sm text-theme-secondary">
-                  Your Database will automatically backup completely independently into your local directory on a {backupFreq} basis.
+                  Your database will back up to this folder on a {backupFreq} schedule while the app is open.
                 </p>
               </div>
            )}
+
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div className="p-3 rounded border border-theme-primary bg-theme-primary">
+               <div className="text-xs text-theme-secondary mb-1">Last attempted run</div>
+               <div className="text-sm text-theme-primary">{formatBackupTime(backupLastRunAt)}</div>
+             </div>
+             <div className="p-3 rounded border border-theme-primary bg-theme-primary">
+               <div className="text-xs text-theme-secondary mb-1">Last successful backup</div>
+               <div className="text-sm text-theme-primary">{formatBackupTime(backupLastSuccessAt)}</div>
+             </div>
+           </div>
+
+           <div className="p-3 rounded border border-theme-primary bg-theme-primary space-y-2">
+             <div>
+               <div className="text-xs text-theme-secondary mb-1">Last result</div>
+               <div className={`text-sm ${backupLastError ? 'text-red-400' : 'text-theme-primary'}`}>
+                 {backupLastError || 'No recent backup errors'}
+               </div>
+             </div>
+             {backupLastPath && (
+               <div>
+                 <div className="text-xs text-theme-secondary mb-1">Last backup file</div>
+                 <div className="text-sm text-theme-primary break-all">{backupLastPath}</div>
+               </div>
+             )}
+           </div>
 
            <div className="grid gap-2">
              <label className="text-sm text-theme-secondary">Backup Directory</label>
@@ -1373,9 +1447,18 @@ const SettingsPage: React.FC = () => {
              </select>
            </div>
            
-           <Button className="px-4 py-2 rounded bg-brand-primary text-white" onClick={handleSetBackupConfig} disabled={settingBackup}>
-              {settingBackup ? 'Saving...' : 'Save Configuration'}
-           </Button>
+           <div className="flex flex-wrap gap-3">
+             <Button className="px-4 py-2 rounded bg-brand-primary text-white" onClick={handleSetBackupConfig} disabled={settingBackup}>
+                {settingBackup ? 'Saving...' : 'Save Configuration'}
+             </Button>
+             <Button onClick={handleRunBackupNow} disabled={runningBackup || !hasBackupConfig || !backupDir.trim()}>
+                {runningBackup ? 'Running Backup...' : 'Run Backup Now'}
+             </Button>
+           </div>
+
+           <div className="text-xs text-theme-secondary">
+             Automatic backups do not run after the app is closed. Keep the app open if you want the schedule to execute.
+           </div>
         </div>
       </div>
 

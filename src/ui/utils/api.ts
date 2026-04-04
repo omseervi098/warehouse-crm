@@ -144,6 +144,11 @@ export const billsApi = {
   }) => ipcCall(window.electron.bills.getFinancialSummary(params)),
 };
 
+export const additionalDebitsApi = {
+  create: (debitData: any) => ipcCall(window.electron.additionalDebits.create(debitData)),
+  delete: (id: string) => ipcCall(window.electron.additionalDebits.delete(id)),
+};
+
 // Payments API
 export const paymentsApi = {
   getAll: (params?: {

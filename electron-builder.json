@@ -11,8 +11,9 @@
         "src/assets/**",
         ".env"
     ],
-    "icon": "./src/assets/logo_transparent.png",
+    "icon": "./src/assets/icon.png",
     "mac": {
+        "icon": "./src/assets/icon.png",
         "target": "dmg"
     },
     "linux": {
@@ -20,8 +21,7 @@
         "category": "Utility"
     },
     "win": {
-        "target": [
-            "nsis"
-        ]
+        "target": "portable",
+        "signAndEditExecutable": false
     }
 }

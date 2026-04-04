@@ -3,25 +3,25 @@ name: Release App
 on:
   push:
     tags:
-      - 'v*' # Trigger on version tags (e.g. v1.0.8)
-  workflow_dispatch: # Allow manual trigger from GitHub UI
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   release:
     name: Build & Release for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write # Needed for creating GitHub Releases
+      contents: write
 
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -32,15 +32,12 @@ jobs:
       - name: Create .env Configuration
         shell: bash
         run: |
-          # Use APP_NAME secret from GitHub if available, otherwise default to "Warehouse CRM"
           echo "VITE_APP_NAME=${{ secrets.APP_NAME || 'Warehouse CRM' }}" >> .env
           echo "VITE_APP_NAME=${{ secrets.APP_NAME || 'Warehouse CRM' }}" >> $GITHUB_ENV
 
       - name: Set Current Repo for Release
         shell: bash
         run: |
-          # Dynamically overwrite the publish repo/owner in electron-builder.json 
-          # so it always publishes to the repository running this Action!
           node -e "
             const fs = require('fs');
             const config = JSON.parse(fs.readFileSync('electron-builder.json', 'utf8'));
@@ -50,13 +47,16 @@ jobs:
             fs.writeFileSync('electron-builder.json', JSON.stringify(config, null, 4));
           "
 
-      - name: Build and Release App
+      - name: Build & Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             npm run dist:win -- --publish always
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            npm run dist:mac -- --publish always -c.mac.identity=null
           else
             npm run dist:linux -- --publish always
           fi

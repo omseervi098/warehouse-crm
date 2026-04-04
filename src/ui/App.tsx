@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const { isDarkMode, theme } = useTheme();
   const [needsSetup, setNeedsSetup] = useState<null | boolean>(null);
+  const isMacOS = window.electron?.platform === 'darwin';
 
   useEffect(() => {
     let mounted = true;
@@ -56,52 +57,65 @@ const App: React.FC = () => {
       ) : needsSetup ? (
         <SetupPage onDone={() => setNeedsSetup(false)} />
       ) : (
-        <div className="flex h-screen bg-theme-secondary">
-          <Sidebar isOpen={isSidebarOpen} setIsOpen={setIsSidebarOpen} />
-          <div className="flex-1 flex flex-col min-w-0">
-            {/* Desktop Title Bar (Custom, Draggable) */}
-            <header
-              className="flex justify-between pl-3 h-9 bg-theme-card border-b border-theme-primary shrink-0 select-none drag-region p-0 m-0"
-              onDoubleClick={() => window.electron?.window?.toggleMaximize?.()}
-            >
-              <div className="flex items-center gap-2 overflow-hidden">
-                {/* @ts-ignore */}
-                <span className={`truncate text-sm ${theme.text.primary}`}>{import.meta.env.VITE_APP_NAME || 'Warehouse CRM'}</span>
-              </div>
-              <div className="flex items-center gap-1 no-drag p-0 m-0">
-                <button
-                  aria-label="Refresh"
-                  title="Refresh (Ctrl/Cmd + R)"
-                  className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
-                  onClick={() => window.location.reload()}
-                >
-                  <span className="text-sm">⟳</span>
-                </button>
-                <button
-                  aria-label="Minimize"
-                  className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
-                  onClick={() => window.electron?.window?.minimize?.()}
-                >
-                  <span className="text-sm">–</span>
-                </button>
-                <button
-                  aria-label="Maximize"
-                  className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
-                  onClick={() => window.electron?.window?.toggleMaximize?.()}
-                >
-                  <span className="text-xs">▢</span>
-                </button>
-                <button
-                  aria-label="Close"
-                  className="m-0 h-10 w-10 grid place-items-center rounded hover:bg-red-500/90 hover:text-white"
-                  onClick={() => window.electron?.window?.close?.()}
-                >
-                  <span className="text-sm">×</span>
-                </button>
-              </div>
-            </header>
+        <div className={`flex h-screen bg-theme-secondary ${isMacOS ? 'macos-shell' : ''}`}>
+          <Sidebar isOpen={isSidebarOpen} setIsOpen={setIsSidebarOpen} isMacOS={isMacOS} />
+          <div className={`flex-1 flex flex-col min-w-0 ${isMacOS ? 'macos-main-shell' : ''}`}>
+            {isMacOS ? (
+              <header
+                className="h-14 bg-theme-card/85 border-b border-theme-primary shrink-0 select-none drag-region macos-titlebar flex items-center justify-center"
+                onDoubleClick={() => window.electron?.window?.toggleMaximize?.()}
+              >
+                <div className="pointer-events-none max-w-full px-6">
+                  {/* @ts-ignore */}
+                  <span className={`truncate text-sm font-medium tracking-[0.02em] ${theme.text.secondary}`}>
+                    {import.meta.env.VITE_APP_NAME || 'Warehouse CRM'}
+                  </span>
+                </div>
+              </header>
+            ) : (
+              <header
+                className="flex justify-between pl-3 h-9 bg-theme-card border-b border-theme-primary shrink-0 select-none drag-region p-0 m-0"
+                onDoubleClick={() => window.electron?.window?.toggleMaximize?.()}
+              >
+                <div className="flex items-center gap-2 overflow-hidden">
+                  {/* @ts-ignore */}
+                  <span className={`truncate text-sm ${theme.text.primary}`}>{import.meta.env.VITE_APP_NAME || 'Warehouse CRM'}</span>
+                </div>
+                <div className="flex items-center gap-1 no-drag p-0 m-0">
+                  <button
+                    aria-label="Refresh"
+                    title="Refresh (Ctrl/Cmd + R)"
+                    className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
+                    onClick={() => window.location.reload()}
+                  >
+                    <span className="text-sm">⟳</span>
+                  </button>
+                  <button
+                    aria-label="Minimize"
+                    className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
+                    onClick={() => window.electron?.window?.minimize?.()}
+                  >
+                    <span className="text-sm">–</span>
+                  </button>
+                  <button
+                    aria-label="Maximize"
+                    className={`m-0 h-10 w-10 grid place-items-center rounded hover:bg-${isDarkMode ? 'white' : 'black'}/10`}
+                    onClick={() => window.electron?.window?.toggleMaximize?.()}
+                  >
+                    <span className="text-xs">▢</span>
+                  </button>
+                  <button
+                    aria-label="Close"
+                    className="m-0 h-10 w-10 grid place-items-center rounded hover:bg-red-500/90 hover:text-white"
+                    onClick={() => window.electron?.window?.close?.()}
+                  >
+                    <span className="text-sm">×</span>
+                  </button>
+                </div>
+              </header>
+            )}
 
-            <main className="flex-1 p-8 overflow-y-auto bg-theme-primary">
+            <main className={`flex-1 overflow-y-auto bg-theme-primary ${isMacOS ? 'p-6 md:p-8' : 'p-8'}`}>
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<DashboardPage />} />

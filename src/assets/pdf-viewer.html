@@ -1,71 +1,237 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src blob: data:; object-src 'none'; base-uri 'none';">
     <title>PDF Preview</title>
     <style>
-        body,
-        html {
+        :root {
+            color-scheme: dark;
+            --bg: #111827;
+            --panel: rgba(15, 23, 42, 0.92);
+            --border: rgba(148, 163, 184, 0.18);
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-hover: #0ea5e9;
+            --danger: #ef4444;
+            --shadow: 0 18px 50px rgba(2, 6, 23, 0.35);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background-color: #525659;
+            background:
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.14), transparent 18%),
+                linear-gradient(180deg, #0b1220 0%, #111827 100%);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            color: var(--text);
         }
 
-        #viewer-container {
+        body.macos {
+            background:
+                radial-gradient(circle at top left, rgba(148, 163, 184, 0.16), transparent 20%),
+                linear-gradient(180deg, #0b1220 0%, #0f172a 100%);
+        }
+
+        #app {
             width: 100%;
             height: 100%;
-            overflow: auto;
+            display: flex;
+            flex-direction: column;
         }
 
-        canvas {
-            display: block;
-            margin: 20px auto;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        #titlebar {
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 14px;
+            background: var(--panel);
+            border-bottom: 1px solid var(--border);
+            -webkit-app-region: drag;
+            user-select: none;
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+        }
+
+        body.macos #titlebar {
+            padding-left: 84px;
+            min-height: 30px;
+        }
+
+        #titlebar-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        #file-badge {
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            background: rgba(56, 189, 248, 0.12);
+            border: 1px solid rgba(56, 189, 248, 0.18);
+            display: grid;
+            place-items: center;
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 800;
+            flex: 0 0 auto;
+        }
+
+        #filename {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #titlebar-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            -webkit-app-region: no-drag;
+            flex: 0 0 auto;
+        }
+
+        #titlebar-right.macos-controls .titlebar-button {
+            display: none;
+        }
+
+        .titlebar-button,
+        #download-btn,
+        #fallback-download {
+            border: none;
+            border-radius: 9px;
+            cursor: pointer;
+            transition: background 0.2s ease, transform 0.2s ease;
+        }
+
+        .titlebar-button {
+            width: 32px;
+            height: 32px;
+            background: transparent;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        .titlebar-button:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .titlebar-button.close:hover {
+            background: var(--danger);
+        }
+
+        #download-btn,
+        #fallback-download {
+            height: 32px;
+            padding: 0 14px;
+            background: var(--accent);
+            color: #082f49;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        #download-btn:hover,
+        #fallback-download:hover {
+            background: var(--accent-hover);
+        }
+
+        #download-btn:active,
+        #fallback-download:active,
+        .titlebar-button:active {
+            transform: scale(0.98);
+        }
+
+        #viewer-shell {
+            flex: 1;
+            min-height: 0;
+            padding: 16px;
+        }
+
+        body.macos #viewer-shell {
+            padding: 18px;
+        }
+
+        #viewer-panel {
+            width: 100%;
+            height: 100%;
+            background: rgba(15, 23, 42, 0.76);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+        }
+
+        #status {
+            padding: 18px;
+            color: var(--muted);
+            font-size: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        #viewer-frame {
+            flex: 1;
+            width: 100%;
+            border: none;
+            background: #1e1e1e;
+        }
+
+        #fallback {
+            display: none;
+            padding: 24px;
+            text-align: center;
+            color: var(--muted);
+        }
+
+        @media (max-width: 640px) {
+            #download-btn {
+                padding: 0 10px;
+            }
         }
     </style>
 </head>
-
 <body>
-    <div id="viewer-container"></div>
-
-    <!-- PDF.js library from a CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-    <script>
-        // Set the worker source for PDF.js
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-
-        // Listen for the PDF data from the main process
-        window.electron.onPdfData((event, dataUri) => {
-            const loadingTask = pdfjsLib.getDocument(dataUri);
-            loadingTask.promise.then(pdf => {
-                const container = document.getElementById('viewer-container');
-                for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-                    pdf.getPage(pageNum).then(page => {
-                        const viewport = page.getViewport({ scale: 1.5 });
-                        const canvas = document.createElement('canvas');
-                        const context = canvas.getContext('2d');
-                        canvas.height = viewport.height;
-                        canvas.width = viewport.width;
-                        container.appendChild(canvas);
-
-                        const renderContext = {
-                            canvasContext: context,
-                            viewport: viewport
-                        };
-                        page.render(renderContext);
-                    });
-                }
-            }).catch(err => {
-                console.error('Error loading PDF:', err);
-                document.body.innerHTML = `<p style="color:white;text-align:center;">Failed to load PDF.</p>`;
-            });
-        });
-    </script>
+    <div id="app">
+        <div id="titlebar">
+            <div id="titlebar-left">
+                <div id="file-badge">PDF</div>
+                <div id="filename">Loading preview…</div>
+            </div>
+            <div id="titlebar-right">
+                <button id="download-btn" title="Download PDF">Download</button>
+                <button class="titlebar-button" id="minimize-btn" title="Minimize">-</button>
+                <button class="titlebar-button" id="maximize-btn" title="Maximize">□</button>
+                <button class="titlebar-button close" id="close-btn" title="Close">×</button>
+            </div>
+        </div>
+        <div id="viewer-shell">
+            <div id="viewer-panel">
+                <div id="status">Preparing PDF preview…</div>
+                <iframe id="viewer-frame" title="PDF Preview"></iframe>
+                <div id="fallback">
+                    <div>Preview could not be rendered in-app.</div>
+                    <button id="fallback-download">Download PDF</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="./pdf-viewer.js"></script>
 </body>
-
 </html>

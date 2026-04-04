@@ -409,9 +409,21 @@ export interface Payment {
   updatedAt: string;
 }
 
+export interface AdditionalDebit {
+  _id: string;
+  party: Pick<Party, '_id' | 'name'>;
+  periodType: 'monthly' | 'quarterly';
+  description: string;
+  amount: number;
+  debitDate: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PartyFinancialSummary {
   party: Pick<Party, '_id' | 'name'>;
   totalCharges: number;       // From charges system
+  totalAdditionalDebits?: number;
   totalBilled: number;        // Sum of all bills
   totalPaid: number;          // Sum of all payments
   outstandingBalance: number; // totalBilled - totalPaid
@@ -419,17 +431,19 @@ export interface PartyFinancialSummary {
   lastPaymentDate?: string;
   billCount: number;
   paymentCount: number;
+  additionalDebitCount?: number;
 }
 
 export interface BillingHistoryItem {
   _id: string;
-  type: 'bill' | 'payment';
+  type: 'bill' | 'payment' | 'additional_debit';
   date: string;
   amount: number;
   description: string;
   billNumber?: string;
   paymentNumber?: string;
   paymentMethod?: string;
+  periodType?: 'monthly' | 'quarterly';
   runningBalance: number;
 }
 
@@ -442,6 +456,7 @@ export interface PaginationInfo {
 declare global {
   interface Window {
     electron: {
+      platform?: string;
       window?: {
         minimize?: () => Promise<{ ok: boolean }>;
         toggleMaximize?: () => Promise<{ ok: boolean; maximized?: boolean }>;
@@ -567,6 +582,10 @@ declare global {
           partyId?: string;
         }) => Promise<{ ok: boolean; data?: PartyFinancialSummary[]; error?: string }>;
       };
+      additionalDebits: {
+        create: (debitData: any) => Promise<{ ok: boolean; data?: AdditionalDebit; error?: string }>;
+        delete: (id: string) => Promise<{ ok: boolean; data?: { success: boolean }; error?: string }>;
+      };
       payments: {
         getAll: (params?: {
           page?: number;
@@ -587,8 +606,22 @@ declare global {
         }) => Promise<{ ok: boolean; data?: BillingHistoryItem[]; error?: string }>;
       };
       autobackup: {
-        getConfig: () => Promise<{ ok: boolean; data?: { frequency: string; directory: string } | null; error?: string }>;
-        setConfig: (config: { frequency: string; directory: string }) => Promise<{ ok: boolean; error?: string }>;
+        getConfig: () => Promise<{ ok: boolean; data?: {
+          frequency: string;
+          directory: string;
+          lastRunAt?: string | null;
+          lastSuccessAt?: string | null;
+          lastError?: string | null;
+          lastBackupPath?: string | null;
+        } | null; error?: string }>;
+        setConfig: (config: { frequency: string; directory: string }) => Promise<{ ok: boolean; data?: {
+          frequency: string;
+          directory: string;
+          lastRunAt?: string | null;
+          lastSuccessAt?: string | null;
+          lastError?: string | null;
+          lastBackupPath?: string | null;
+        }; error?: string }>;
         selectDirectory: () => Promise<{ ok: boolean; data?: string; error?: string }>;
         triggerBackup: () => Promise<{ ok: boolean; data?: string; error?: string }>;
       };

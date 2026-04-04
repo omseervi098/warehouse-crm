@@ -169,6 +169,81 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
+.macos-titlebar {
+  padding-left: 5.5rem;
+  padding-right: 1rem;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.macos-shell {
+  padding: 0;
+  background:
+    radial-gradient(circle at top left, rgba(148, 163, 184, 0.18), transparent 24%),
+    linear-gradient(180deg, #0b1220 0%, #111827 100%);
+}
+
+.macos-main-shell {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 1.25rem;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.28);
+}
+
+.macos-sidebar {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.25rem;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(30, 41, 59, 0.92) 0%, rgba(15, 23, 42, 0.96) 100%);
+  box-shadow: 0 18px 50px rgba(2, 6, 23, 0.35);
+}
+
+.macos-sidebar-header {
+  padding-top: 0.5rem;
+  height: 6.5rem;
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+.macos-sidebar-nav {
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+}
+
+.macos-sidebar-nav::-webkit-scrollbar {
+  width: 6px;
+}
+
+.macos-sidebar-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.macos-sidebar-nav::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+}
+
+.macos-sidebar-nav::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.65);
+}
+
+.macos-sidebar-footer {
+  border-top-color: rgba(255, 255, 255, 0.06);
+  padding-bottom: 0.75rem;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0) 0%, rgba(15, 23, 42, 0.38) 100%);
+}
+
+@media (min-width: 768px) {
+  .macos-sidebar {
+    top: 0;
+    bottom: 0;
+    left: 0;
+  }
+}
+
 /* Background utilities */
 .bg-theme-primary { background-color: var(--bg-primary); }
 .bg-theme-secondary { background-color: var(--bg-secondary); }

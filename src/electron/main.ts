@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron';
 import { EJSON } from 'bson';
 import dotenv from 'dotenv';
 import keytar from 'keytar';
@@ -10,6 +10,7 @@ import path from 'node:path';
 import dns from "node:dns";
 import Bill from './models/bill.js';
 import Company from './models/company.js';
+import AdditionalDebit from './models/additionalDebit.js';
 import Item from './models/item.js';
 import Party from "./models/party.js";
 import Payment from './models/payment.js';
@@ -123,6 +124,17 @@ function setupAutoUpdater(mainWindow: BrowserWindow, tray: Tray) {
 
 const KEYTAR_SERVICE = 'warehouse-crm';
 const KEYTAR_ACCOUNT_MONGO_URI = 'MONGO_URI';
+const LEGACY_KEYTAR_SERVICE_AUTO_BACKUP = 'WarehouseCRM';
+const KEYTAR_ACCOUNT_AUTO_BACKUP = 'AutoBackup';
+
+type AutoBackupConfig = {
+    frequency: string;
+    directory: string;
+    lastRunAt?: string | null;
+    lastSuccessAt?: string | null;
+    lastError?: string | null;
+    lastBackupPath?: string | null;
+};
 
 async function initMongo() {
     // Prefer secure storage via keytar. Fallback to env for development convenience.
@@ -136,6 +148,48 @@ async function initMongo() {
         });
     }
     return true;
+}
+
+function normalizeAutoBackupConfig(raw: any): AutoBackupConfig {
+    return {
+        frequency: raw?.frequency || 'never',
+        directory: raw?.directory || '',
+        lastRunAt: raw?.lastRunAt || null,
+        lastSuccessAt: raw?.lastSuccessAt || null,
+        lastError: raw?.lastError || null,
+        lastBackupPath: raw?.lastBackupPath || null,
+    };
+}
+
+async function readAutoBackupConfig(): Promise<AutoBackupConfig | null> {
+    const configStr = await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_AUTO_BACKUP)
+        || await keytar.getPassword(LEGACY_KEYTAR_SERVICE_AUTO_BACKUP, KEYTAR_ACCOUNT_AUTO_BACKUP);
+    if (!configStr) return null;
+    return normalizeAutoBackupConfig(JSON.parse(configStr));
+}
+
+async function writeAutoBackupConfig(config: AutoBackupConfig): Promise<void> {
+    await keytar.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_AUTO_BACKUP, JSON.stringify(config));
+}
+
+async function validateBackupDirectory(dirPath: string): Promise<void> {
+    const trimmedPath = dirPath.trim();
+    if (!trimmedPath) throw new Error('Backup directory is required.');
+
+    await fs.promises.mkdir(trimmedPath, { recursive: true });
+    await fs.promises.access(trimmedPath, fs.constants.W_OK);
+
+    const probePath = path.join(trimmedPath, `.warehouse-crm-backup-check-${Date.now()}.tmp`);
+    await fs.promises.writeFile(probePath, 'backup-check');
+    await fs.promises.unlink(probePath);
+}
+
+async function updateAutoBackupStatus(updates: Partial<AutoBackupConfig>): Promise<AutoBackupConfig | null> {
+    const current = await readAutoBackupConfig();
+    if (!current) return null;
+    const nextConfig = normalizeAutoBackupConfig({ ...current, ...updates });
+    await writeAutoBackupConfig(nextConfig);
+    return nextConfig;
 }
 
 
@@ -855,9 +909,9 @@ function registerIpcHandlers() {
     // Auto Backup API Handlers
     ipcMain.handle('autobackup:getConfig', async () => {
         try {
-            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
-            if(configStr) {
-                return { ok: true, data: JSON.parse(configStr) };
+            const config = await readAutoBackupConfig();
+            if (config) {
+                return { ok: true, data: config };
             }
             return { ok: true, data: null };
         } catch (e: any) { return { ok: false, error: e.message }; }
@@ -865,9 +919,17 @@ function registerIpcHandlers() {
 
     ipcMain.handle('autobackup:setConfig', async (_e, config: { frequency: string, directory: string }) => {
         try {
-            await keytar.setPassword('WarehouseCRM', 'AutoBackup', JSON.stringify(config));
+            const nextConfig = normalizeAutoBackupConfig({
+                ...(await readAutoBackupConfig()),
+                frequency: config.frequency,
+                directory: config.directory.trim(),
+            });
+            if (nextConfig.frequency !== 'never') {
+                await validateBackupDirectory(nextConfig.directory);
+            }
+            await writeAutoBackupConfig(nextConfig);
             await setupBackupCron();
-            return { ok: true };
+            return { ok: true, data: nextConfig };
         } catch (e: any) { return { ok: false, error: e.message }; }
     });
 
@@ -884,13 +946,32 @@ function registerIpcHandlers() {
 
     ipcMain.handle('autobackup:triggerBackup', async () => {
         try {
-            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
-            if(!configStr) throw new Error('Not configured');
-            const config = JSON.parse(configStr);
+            const config = await readAutoBackupConfig();
+            if (!config) throw new Error('Backup is not configured.');
+            if (!config.directory) throw new Error('Backup directory is not configured.');
+            await validateBackupDirectory(config.directory);
+            await updateAutoBackupStatus({
+                lastRunAt: new Date().toISOString(),
+                lastError: null,
+            });
             const zipPath = await generateBackupZipPath(config.directory);
-            if(zipPath) return { ok: true, data: zipPath };
-            throw new Error('Failed to generate zip');
-        } catch (e: any) { return { ok: false, error: e.message }; }
+            if (zipPath) {
+                await updateAutoBackupStatus({
+                    lastRunAt: new Date().toISOString(),
+                    lastSuccessAt: new Date().toISOString(),
+                    lastError: null,
+                    lastBackupPath: zipPath,
+                });
+                return { ok: true, data: zipPath };
+            }
+            throw new Error('Failed to generate backup zip.');
+        } catch (e: any) {
+            await updateAutoBackupStatus({
+                lastRunAt: new Date().toISOString(),
+                lastError: e.message,
+            });
+            return { ok: false, error: e.message };
+        }
     });
 
     // --- CRON SCHEDULING ---
@@ -902,16 +983,35 @@ function registerIpcHandlers() {
                 activeCronTask.stop();
                 activeCronTask = null;
             }
-            const configStr = await keytar.getPassword('WarehouseCRM', 'AutoBackup');
-            if (configStr) {
-                const config = JSON.parse(configStr);
+            const config = await readAutoBackupConfig();
+            if (config) {
                 if (config.frequency && config.frequency !== 'never' && config.directory) {
                     let expr = '0 0 * * *'; // daily
                     if (config.frequency === 'weekly') expr = '0 0 * * 0'; // Sundays
                     else if (config.frequency === 'monthly') expr = '0 0 1 * *'; // 1st of month
 
                     activeCronTask = cron.schedule(expr, async () => {
-                        await generateBackupZipPath(config.directory);
+                        const runAt = new Date().toISOString();
+                        try {
+                            await validateBackupDirectory(config.directory);
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastError: null,
+                            });
+                            const zipPath = await generateBackupZipPath(config.directory);
+                            if (!zipPath) throw new Error('Failed to generate backup zip.');
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastSuccessAt: new Date().toISOString(),
+                                lastError: null,
+                                lastBackupPath: zipPath,
+                            });
+                        } catch (error: any) {
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastError: error?.message || 'Scheduled backup failed.',
+                            });
+                        }
                     });
                 }
             }
@@ -2262,6 +2362,57 @@ function registerIpcHandlers() {
         }
     });
 
+    ipcMain.handle('additionalDebits:create', async (_e, debitData: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            if (!debitData.party || !debitData.periodType || !debitData.description || !debitData.amount || !debitData.debitDate) {
+                return { ok: false, error: 'Missing required additional debit fields' };
+            }
+
+            if (!['monthly', 'quarterly'].includes(debitData.periodType)) {
+                return { ok: false, error: 'Invalid period type' };
+            }
+
+            if (debitData.amount <= 0) {
+                return { ok: false, error: 'Amount must be greater than zero' };
+            }
+
+            const additionalDebit = new AdditionalDebit({
+                party: debitData.party,
+                periodType: debitData.periodType,
+                description: debitData.description.trim(),
+                amount: debitData.amount,
+                debitDate: new Date(debitData.debitDate),
+            });
+
+            await additionalDebit.save();
+            await additionalDebit.populate('party', 'name');
+
+            return { ok: true, data: toPlain(additionalDebit) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('additionalDebits:delete', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const additionalDebit = await AdditionalDebit.findById(id);
+            if (!additionalDebit) {
+                return { ok: false, error: 'Additional debit not found' };
+            }
+
+            await AdditionalDebit.findByIdAndDelete(id);
+            return { ok: true, data: { success: true } };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
     ipcMain.handle('bills:getFinancialSummary', async (_e, params?: any) => {
         try {
             await initMongo();
@@ -2292,11 +2443,13 @@ function registerIpcHandlers() {
 
                 // Get payments for this party
                 const payments = await Payment.find({ party: party._id as any }).lean();
+                const additionalDebits = await AdditionalDebit.find({ party: party._id as any }).lean();
 
                 // Calculate totals
                 const totalBilled = bills.reduce((sum, bill) => sum + bill.amount, 0);
                 const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
                 const outstandingBalance = totalBilled - totalPaid;
+                const totalAdditionalDebits = additionalDebits.reduce((sum, debit) => sum + debit.amount, 0);
 
                 // Get charges for this party (for total charges calculation)
                 let totalCharges = 0;
@@ -2306,6 +2459,7 @@ function registerIpcHandlers() {
                 } catch (error) {
                     console.warn('Could not fetch charges for party:', party._id as any, error);
                 }
+                const netCharges = totalCharges - totalAdditionalDebits;
 
                 // Find latest dates
                 const lastBillDate = bills.length > 0
@@ -2321,14 +2475,16 @@ function registerIpcHandlers() {
                         _id: (party._id as any).toString(),
                         name: party.name as any
                     },
-                    totalCharges,
+                    totalCharges: netCharges,
+                    totalAdditionalDebits,
                     totalBilled,
                     totalPaid,
                     outstandingBalance,
                     lastBillDate,
                     lastPaymentDate,
                     billCount: bills.length,
-                    paymentCount: payments.length
+                    paymentCount: payments.length,
+                    additionalDebitCount: additionalDebits.length
                 });
             }
 
@@ -2681,6 +2837,16 @@ function registerIpcHandlers() {
                 .sort({ paymentDate: -1 })
                 .lean();
 
+            const additionalDebitQuery: any = { party: new mongoose.Types.ObjectId(partyId) };
+            if (Object.keys(dateFilter).length > 0) {
+                additionalDebitQuery.debitDate = dateFilter;
+            }
+
+            const additionalDebits = await AdditionalDebit.find(additionalDebitQuery)
+                .populate('party', 'name')
+                .sort({ debitDate: -1 })
+                .lean();
+
 
 
 
@@ -2715,14 +2881,32 @@ function registerIpcHandlers() {
                 });
             });
 
+            additionalDebits.forEach((debit: any) => {
+                historyItems.push({
+                    _id: debit._id.toString(),
+                    type: 'additional_debit',
+                    date: debit.debitDate,
+                    amount: debit.amount,
+                    description: debit.description,
+                    periodType: debit.periodType,
+                    runningBalance: 0
+                });
+            });
+
             // Sort by date (oldest first for running balance calculation)
             historyItems.sort((a, b) => {
                 const dateA = new Date(a.date).getTime();
                 const dateB = new Date(b.date).getTime();
                 if (dateA !== dateB) return dateA - dateB;
 
-                // If dates are equal, bills come before payments (bill generated, then paid)
-                if (a.type !== b.type) return a.type === 'bill' ? -1 : 1;
+                if (a.type !== b.type) {
+                    const typeOrder: Record<string, number> = {
+                        bill: 0,
+                        additional_debit: 1,
+                        payment: 2,
+                    };
+                    return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+                }
 
                 // Fallback to ID for stability
                 return a._id.localeCompare(b._id);
@@ -2745,8 +2929,14 @@ function registerIpcHandlers() {
                 const dateB = new Date(b.date).getTime();
                 if (dateA !== dateB) return dateB - dateA; // Descending
 
-                // If dates are equal, payments come before bills (Display: Payment on top of Bill)
-                if (a.type !== b.type) return a.type === 'payment' ? -1 : 1;
+                if (a.type !== b.type) {
+                    const typeOrder: Record<string, number> = {
+                        payment: 0,
+                        additional_debit: 1,
+                        bill: 2,
+                    };
+                    return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+                }
 
                 return b._id.localeCompare(a._id);
             });
@@ -2763,12 +2953,23 @@ app.on("ready", async () => {
     try { await initMongo(); } catch (e) { /* ignore at startup */ }
     registerIpcHandlers();
 
+    if (process.platform === 'darwin' && app.dock) {
+        try {
+            app.dock.setIcon(path.join(getAssetsPath() + '/icon.png'));
+        } catch (e) {
+            console.error('Failed to set macOS dock icon:', e);
+        }
+    }
+
+    const isMacOS = process.platform === 'darwin';
+
     const mainWindow = new BrowserWindow({
         width: 800,
         height: 600,
 
         icon: path.join(getAssetsPath() + '/icon@5x.png'),
-        titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+        titleBarStyle: isMacOS ? 'hiddenInset' : 'hidden',
+        trafficLightPosition: isMacOS ? { x: 16, y: 12 } : undefined,
         webPreferences: {
             preload: getPreloadPath(),
             // Disable DevTools in production
@@ -2852,155 +3053,26 @@ app.on("ready", async () => {
                 width: 800,
                 height: 600,
                 title: 'PDF Preview - ' + sanitizedFileName,
-                frame: false,
+                frame: process.platform !== 'darwin' ? false : true,
                 alwaysOnTop: true,
+                titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : undefined,
+                trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 14 } : undefined,
                 webPreferences: {
                     nodeIntegration: false,
                     contextIsolation: true,
                     preload: getPdfPreviewPreloadPath(),
                 },
             })
+            ipcMain.once('pdf-preview:ready', (event) => {
+                if (event.sender !== win.webContents) return;
+                win.webContents.send('pdf-preview:data', {
+                    dataUri: dataURL,
+                    fileName: sanitizedFileName,
+                    platform: process.platform,
+                });
+            });
 
-            const htmlContent = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src data:;">
-                <style>
-                    * { margin: 0; padding: 0; box-sizing: border-box; }
-                    body { 
-                        width: 100vw; 
-                        height: 100vh; 
-                        overflow: hidden;
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                        background: #1e1e1e;
-                    }
-                    #titlebar {
-                        height: 40px;
-                        background: #2c3e50;
-                        display: flex;
-                        align-items: center;
-                        justify-content: space-between;
-                        padding: 0 12px;
-                        -webkit-app-region: drag;
-                        user-select: none;
-                        z-index: 10;
-                    }
-                    #titlebar-left {
-                        display: flex;
-                        align-items: center;
-                        gap: 12px;
-                        color: #ecf0f1;
-                        font-size: 13px;
-                        font-weight: 500;
-                    }
-                    #titlebar-right {
-                        display: flex;
-                        align-items: center;
-                        gap: 4px;
-                        -webkit-app-region: no-drag;
-                    }
-                    .titlebar-button {
-                        width: 36px;
-                        height: 28px;
-                        border: none;
-                        background: transparent;
-                        color: #ecf0f1;
-                        cursor: pointer;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        border-radius: 4px;
-                        transition: background 0.2s;
-                        font-size: 16px;
-                    }
-                    .titlebar-button:hover {
-                        background: rgba(255, 255, 255, 0.1);
-                    }
-                    .titlebar-button.close:hover {
-                        background: #e74c3c;
-                    }
-                    #download-btn {
-                        background: #3498db;
-                        color: white;
-                        padding: 6px 16px;
-                        border: none;
-                        border-radius: 4px;
-                        cursor: pointer;
-                        font-size: 13px;
-                        font-weight: 500;
-                        display: flex;
-                        align-items: center;
-                        gap: 6px;
-                        transition: background 0.2s;
-                        margin-right: 8px;
-                    }
-                    #download-btn:hover {
-                        background: #2980b9;
-                    }
-                    #download-btn:active {
-                        transform: scale(0.98);
-                    }
-                    #pdf-container {
-                        width: 100%;
-                        height: calc(100vh - 40px);
-                        border: none;
-                    }
-                    @media (max-width: 600px) {
-                        #titlebar-left {
-                            display: none;
-                        }
-                </style>
-            </head>
-            <body>
-                <div id="titlebar">
-                    <div id="titlebar-left">
-                        <span>📄</span>
-                        <span id="filename">${sanitizedFileName}</span>
-                    </div>
-                    <div id="titlebar-right">
-                        <button class="titlebar-button download" id="download-btn" title="Download PDF">⬇</button>
-                        <button class="titlebar-button" id="minimize-btn">─</button>
-                        <button class="titlebar-button" id="maximize-btn">☐</button>
-                        <button class="titlebar-button close" id="close-btn">✕</button>
-                    </div>
-                </div>
-                <iframe id="pdf-container" src="${dataURL}" frameborder="0" ></iframe>
-                
-                <script>
-                    document.getElementById('download-btn').addEventListener('click', async () => {
-                        const result = await window.pdfPreview.download(${JSON.stringify(dataURL)}, ${JSON.stringify(sanitizedFileName)});
-                        if (result && result.ok) {
-                            const btn = document.getElementById('download-btn');
-                            const originalIcon = btn.innerHTML;
-                            btn.innerHTML = '✓';
-                            btn.classList.add('success');
-                            setTimeout(() => {
-                                btn.innerHTML = originalIcon;
-                                btn.classList.remove('success');
-                            }, 2000);
-                        }
-                    });
-                    document.getElementById('maximize-btn').addEventListener('click', async () => {
-                        const result = await window.pdfPreview.toggleMaximize();
-                        if (result && result.ok) {
-                            const btn = document.getElementById('maximize-btn');
-                            btn.innerHTML = result.maximized ? '🗗' : '☐';
-                        }
-                    });
-                    document.getElementById('minimize-btn').addEventListener('click', () => {
-                        window.pdfPreview.minimize();
-                    });
-                    
-                    document.getElementById('close-btn').addEventListener('click', () => {
-                        window.pdfPreview.close();
-                    });
-                </script>
-            </body>
-            </html>
-        `;
-
-            await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+            await win.loadFile(path.join(getAssetsPath(), 'pdf-viewer.html'));
 
             return { ok: true };
         } catch (error) {
@@ -3035,8 +3107,16 @@ app.on("ready", async () => {
 });
 
 function createTray(mainWindow: BrowserWindow) {
-    const tray = new Tray(path.join(getAssetsPath() + '/icon@5x.png'));
+    const trayIcon = process.platform === 'darwin'
+        ? nativeImage
+            .createFromPath(path.join(getAssetsPath() + '/logo_grayscale.png'))
+            .resize({ width: 18, height: 18 })
+        : path.join(getAssetsPath() + '/icon@5x.png');
+    const tray = new Tray(trayIcon);
     tray.setToolTip(process.env.VITE_APP_NAME || 'Warehouse CRM');
+    if (process.platform === 'darwin') {
+        tray.setIgnoreDoubleClickEvents(true);
+    }
     tray.on('click', () => mainWindow.show());
     tray.setContextMenu(Menu.buildFromTemplate([
         { label: 'Show', click: () => mainWindow.show() },

@@ -1172,14 +1172,16 @@ export async function downloadBillingHistoryPdf(
   const totalTransactions = historyItems.length;
   const totalBills = historyItems.filter(item => item.type === 'bill').length;
   const totalPayments = historyItems.filter(item => item.type === 'payment').length;
+  const totalAdditionalDebits = historyItems.filter(item => item.type === 'additional_debit').length;
   const totalBillAmount = historyItems.filter(item => item.type === 'bill').reduce((sum, item) => sum + item.amount, 0);
   const totalPaymentAmount = historyItems.filter(item => item.type === 'payment').reduce((sum, item) => sum + item.amount, 0);
+  const totalAdditionalDebitAmount = historyItems.filter(item => item.type === 'additional_debit').reduce((sum, item) => sum + item.amount, 0);
   const currentBalance = historyItems.length > 0 ? historyItems[0].runningBalance : 0;
 
   // Summary box
   doc.setDrawColor(200, 200, 200);
   doc.setFillColor(250, 250, 250);
-  doc.roundedRect(margin, y, pageW - 2 * margin, 25, 3, 3, 'FD');
+  doc.roundedRect(margin, y, pageW - 2 * margin, 32, 3, 3, 'FD');
 
   doc.setFontSize(10);
   doc.setFont('helvetica', 'bold');
@@ -1189,6 +1191,7 @@ export async function downloadBillingHistoryPdf(
   doc.setFont('helvetica', 'normal');
   doc.text(`Total Transactions: ${totalTransactions}`, margin + 5, y + 12);
   doc.text(`Bills: ${totalBills} (Rs ${totalBillAmount.toFixed(2)})`, margin + 5, y + 18);
+  doc.text(`Additional Debits: ${totalAdditionalDebits} (Rs ${totalAdditionalDebitAmount.toFixed(2)})`, margin + 5, y + 24);
 
   doc.text(`Payments: ${totalPayments} (Rs ${totalPaymentAmount.toFixed(2)})`, pageW / 2 + 5, y + 12);
 
@@ -1201,16 +1204,16 @@ export async function downloadBillingHistoryPdf(
   doc.text(`Current Balance: Rs ${currentBalance.toFixed(2)}`, pageW / 2 + 5, y + 18);
   doc.setTextColor(0, 0, 0); // Reset color
 
-  y += 35;
+  y += 42;
 
   // Transaction History Table
   if (historyItems.length > 0) {
     const tableData = historyItems.map(item => [
       new Date(item.date).toLocaleDateString('en-IN'),
-      item.type.toUpperCase(),
-      item.type === 'bill' ? item.billNumber : item.paymentNumber,
+      item.type === 'additional_debit' ? 'ADDITIONAL DEBIT' : item.type.toUpperCase(),
+      item.type === 'bill' ? item.billNumber : item.type === 'payment' ? item.paymentNumber : (item.periodType === 'quarterly' ? 'QTR' : 'MTH'),
       item.description,
-      item.type === 'payment' && item.paymentMethod ? item.paymentMethod.toUpperCase() : '',
+      item.type === 'payment' && item.paymentMethod ? item.paymentMethod.toUpperCase() : item.type === 'additional_debit' && item.periodType ? item.periodType.toUpperCase() : '',
       `Rs ${item.amount.toFixed(2)}`,
       `Rs ${item.runningBalance.toFixed(2)}`
     ]);
@@ -1250,6 +1253,8 @@ export async function downloadBillingHistoryPdf(
             data.cell.styles.textColor = [220, 53, 69]; // Red for bills
           } else if (data.cell.text[0] === 'PAYMENT') {
             data.cell.styles.textColor = [40, 167, 69]; // Green for payments
+          } else if (data.cell.text[0] === 'ADDITIONAL DEBIT') {
+            data.cell.styles.textColor = [217, 119, 6];
           }
         }
         // Color code amounts
@@ -1257,6 +1262,8 @@ export async function downloadBillingHistoryPdf(
           const rowIndex = data.row.index;
           if (tableData[rowIndex] && tableData[rowIndex][1] === 'BILL') {
             data.cell.styles.textColor = [220, 53, 69]; // Red for bill amounts
+          } else if (tableData[rowIndex] && tableData[rowIndex][1] === 'ADDITIONAL DEBIT') {
+            data.cell.styles.textColor = [217, 119, 6];
           } else {
             data.cell.styles.textColor = [40, 167, 69]; // Green for payment amounts
           }

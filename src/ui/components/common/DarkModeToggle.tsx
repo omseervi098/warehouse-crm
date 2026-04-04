@@ -52,7 +52,7 @@ export const DarkModeToggle: React.FC<DarkModeToggleProps> = ({
       className={`
         flex items-center px-4 py-3 text-slate-200 hover:bg-white/10 
         transition-colors duration-150 rounded-lg hover:text-white
-        ${!isExpanded ? 'justify-center' : ''}
+        ${!isExpanded ? 'justify-center h-11 w-11 px-0 py-0 mx-auto' : ''}
         ${className}
       `}
       title={isExpanded ? `Switch to ${isDarkMode ? 'light' : 'dark'} mode` : 'Toggle theme'}

@@ -1,6 +1,7 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electron', {
+    platform: process.platform,
     window: {
         minimize: async () => ipcRenderer.invoke('window:minimize'),
         toggleMaximize: async () => ipcRenderer.invoke('window:toggleMaximize'),
@@ -189,6 +190,10 @@ contextBridge.exposeInMainWorld('electron', {
         delete: async (id: string) => ipcRenderer.invoke('bills:delete', id),
         generatePdf: async (id: string) => ipcRenderer.invoke('bills:generatePdf', id),
         getFinancialSummary: async (params?: any) => ipcRenderer.invoke('bills:getFinancialSummary', params),
+    },
+    additionalDebits: {
+        create: async (debitData: any) => ipcRenderer.invoke('additionalDebits:create', debitData),
+        delete: async (id: string) => ipcRenderer.invoke('additionalDebits:delete', id),
     },
     payments: {
         getAll: async (params?: any) => ipcRenderer.invoke('payments:getAll', params),
