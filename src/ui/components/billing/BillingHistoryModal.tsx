@@ -174,7 +174,7 @@ const BillingHistoryModal: React.FC<BillingHistoryModalProps> = ({
 
         setExporting(true);
         try {
-            await downloadBillingHistoryPdf(party, filteredItems, filters);
+            await downloadBillingHistoryPdf(party, filteredItems);
             notify({
                 type: 'success',
                 message: 'Billing history exported successfully'

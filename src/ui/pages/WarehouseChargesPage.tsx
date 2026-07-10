@@ -10,7 +10,7 @@ import { useAppContext } from '../contexts/AppContext';
 import { useNotify } from '../hooks/useNotify';
 import { useTheme } from '../hooks/useTheme';
 import { Charge } from '../types';
-import { chargesApi, stockBalanceApi } from '../utils/api';
+import { chargesApi } from '../utils/api';
 import { downloadChargeReportPdf, downloadChargesReportPdf } from '../utils/exportpdf';
 import { getDisplayLotNumber } from '../utils/lotNumber';
 const ExportIcon = () => (
@@ -47,15 +47,14 @@ const WarehouseChargesPage: React.FC = () => {
   );
 
   const apiParams = useMemo(() => {
+    const onlyNil = nilStockIncluded === 'onlyNil';
     const params: any = {
       page: currentPage,
       limit: itemsPerPage,
-      sort: sortConfig.key,
-      order: sortConfig.direction,
+      sort: onlyNil ? 'latestEntryAt' : sortConfig.key,
+      order: onlyNil ? 'asc' : sortConfig.direction,
       filters: {},
-      rangeFilters: {
-        earliestEntryAt: {}
-      }
+      rangeFilters: {}
     };
 
     if (filterQuery.trim()) {
@@ -71,7 +70,7 @@ const WarehouseChargesPage: React.FC = () => {
     }
 
     if (nilStockIncluded && nilStockIncluded !== 'all') {
-      if (nilStockIncluded === 'onlyNil') {
+      if (onlyNil) {
         params.filters['isNil'] = true;
       }
       else if (nilStockIncluded === 'withoutNil') {
@@ -88,8 +87,7 @@ const WarehouseChargesPage: React.FC = () => {
     }
 
     if (dateRange.startDate) {
-      // if only nill stock is selected, then we should filter by latestEntryAt
-      if (nilStockIncluded === 'onlyNil') {
+      if (onlyNil) {
         params.rangeFilters.latestEntryAt = params.rangeFilters.latestEntryAt || {};
         params.rangeFilters.latestEntryAt.from = dateRange.startDate;
       } else {
@@ -98,7 +96,7 @@ const WarehouseChargesPage: React.FC = () => {
       }
     }
     if (dateRange.endDate) {
-      if (nilStockIncluded === 'onlyNil') {
+      if (onlyNil) {
         params.rangeFilters.latestEntryAt = params.rangeFilters.latestEntryAt || {};
         params.rangeFilters.latestEntryAt.to = dateRange.endDate;
       } else {
@@ -146,11 +144,6 @@ const WarehouseChargesPage: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedCharge, setSelectedCharge] = useState<Charge | null>(null);
 
-  // Migration state
-  const [isMigrating, setIsMigrating] = useState(false);
-  const [isMigratingLots, setIsMigratingLots] = useState(false);
-  const [migrationResult, setMigrationResult] = useState<any>(null);
-
   const openModalForCharge = useCallback(async (c: Charge) => {
     try {
       // Use lot number instead of ID since the ID might be from Charge collection
@@ -190,15 +183,22 @@ const WarehouseChargesPage: React.FC = () => {
 
     let toastId: string | undefined;
     try {
-      // Fetch all charges (bypass pagination)
-      const exportParams = { ...apiParams };
-      exportParams.limit = 1000000; // Large limit to fetch all
-      exportParams.page = 0;
+      const exportParams = {
+        ...apiParams,
+        page: 0,
+        limit: 1000000,
+        sort: 'latestEntryAt',
+        order: 'asc' as const,
+      };
 
       toastId = notify({ type: 'loading', message: 'Preparing export...' });
 
       const { data } = await chargesApi.getAll(exportParams);
-      const allCharges = data.results || [];
+      const allCharges = [...(data.results || [])].sort((a, b) => {
+        const ta = a.latestEntryAt ? new Date(a.latestEntryAt).getTime() : 0;
+        const tb = b.latestEntryAt ? new Date(b.latestEntryAt).getTime() : 0;
+        return ta - tb;
+      });
 
       if (allCharges.length === 0) {
         notify({ type: 'error', message: 'No charges found to export', id: toastId });
@@ -215,104 +215,10 @@ const WarehouseChargesPage: React.FC = () => {
     }
   }, [partyFilter, nilStockIncluded, parties, dateRange, apiParams, notify]);
 
-  // Migration handlers
-  const handleMigration = useCallback(async () => {
-    try {
-      setIsMigrating(true);
-      setMigrationResult(null);
-
-      const { data } = await chargesApi.migrateExisting();
-      setMigrationResult(data);
-
-      notify({
-        type: 'success',
-        message: `Migration completed: ${(data as any).successful} successful, ${(data as any).failed} failed, ${(data as any).skipped} skipped`
-      });
-
-      // Refresh the charges list after migration
-      fetchCharges(apiParams);
-    } catch (error) {
-      console.error('Migration failed:', error);
-      notify({ type: 'error', message: 'Migration failed' });
-    } finally {
-      setIsMigrating(false);
-    }
-  }, [notify, fetchCharges, apiParams]);
-
-  const handleLotMigration = useCallback(async () => {
-    try {
-      setIsMigratingLots(true);
-      const { data } = await stockBalanceApi.migrateLotNumbers();
-
-      notify({
-        type: 'success',
-        message: data?.message || 'Lot Number Migration completed!'
-      });
-
-      // Refresh the list after migration
-      fetchCharges(apiParams);
-    } catch (error) {
-      console.error('Lot Migration failed:', error);
-      notify({ type: 'error', message: 'Lot migration failed' });
-    } finally {
-      setIsMigratingLots(false);
-    }
-  }, [notify, fetchCharges, apiParams]);
-
-  const handleValidation = useCallback(async () => {
-    try {
-      const { data } = await chargesApi.validateMigration(10);
-      notify({
-        type: (data as any).mismatches.length === 0 ? 'success' : 'error',
-        message: `Validation completed: ${(data as any).validated} validated, ${(data as any).mismatches.length} mismatches`
-      });
-    } catch (error) {
-      console.error('Validation failed:', error);
-      notify({ type: 'error', message: 'Validation failed' });
-    }
-  }, [notify]);
-
-  const handleCleanup = useCallback(async () => {
-    try {
-      const { data } = await chargesApi.cleanupOrphaned();
-      notify({
-        type: 'success',
-        message: `Cleanup completed: ${data as any} orphaned records removed`
-      });
-    } catch (error) {
-      console.error('Cleanup failed:', error);
-      notify({ type: 'error', message: 'Cleanup failed' });
-    }
-  }, [notify]);
-
   return (
     <div>
       <PageHeader title="Warehouse Charges">
         <div className="flex space-x-2">
-          {/* Migration buttons - temporary for testing */}
-          {/* <Button
-            variant="secondary"
-            onClick={handleMigration}
-            disabled={isMigrating || isMigratingLots}
-            size="sm"
-          >
-            {isMigrating ? 'Migrating...' : 'Migrate Charges'}
-          </Button> */}
-          {/* <Button
-            variant="secondary"
-            onClick={handleLotMigration}
-            disabled={isMigratingLots || isMigrating}
-            size="sm"
-          >
-            {isMigratingLots ? 'Migrating...' : 'Migrate Lot Nos.'}
-          </Button> */}
-          {/* <Button variant="secondary" onClick={handleValidation} size="sm">
-            Validate
-          </Button>
-          <Button variant="secondary" onClick={handleCleanup} size="sm">
-            Cleanup
-          </Button>  */}
-
           {(charges || []).length > 0 && (
             <Button variant="secondary" onClick={handleChargesExport}>
               <ExportIcon /> Export
@@ -338,33 +244,6 @@ const WarehouseChargesPage: React.FC = () => {
         storeFilter={storeFilter}
         setStoreFilter={setStoreFilter}
       />
-
-      {/* Migration Results - temporary for testing */}
-      {migrationResult && (
-        <div className={`mb-4 p-4 rounded-lg border ${theme.border.primary} ${theme.bg.secondary}`}>
-          <h4 className="font-medium mb-2">Migration Results:</h4>
-          <div className="text-sm space-y-1">
-            <div>Total Processed: {migrationResult.totalProcessed}</div>
-            <div className="text-green-600">Successful: {migrationResult.successful}</div>
-            <div className="text-red-600">Failed: {migrationResult.failed}</div>
-            <div className="text-yellow-600">Skipped: {migrationResult.skipped}</div>
-            <div>Duration: {migrationResult.duration}ms</div>
-          </div>
-
-          {migrationResult.errors.length > 0 && (
-            <div className="mt-2">
-              <h5 className="font-medium text-red-600">Errors:</h5>
-              <div className="text-xs space-y-1 max-h-32 overflow-y-auto">
-                {migrationResult.errors.map((error: any, idx: number) => (
-                  <div key={idx}>
-                    <strong>{error.lotNumber}:</strong> {error.error}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Table */}
       <div className={`responsive-table-wrapper ${theme.bg.card} border ${theme.border.primary} rounded-xl shadow-sm overflow-hidden hover:shadow-md transition-shadow duration-200 text-xs`}>

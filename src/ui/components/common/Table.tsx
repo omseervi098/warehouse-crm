@@ -41,7 +41,7 @@ export function SortableTh<T>({ children, sortKey, sortConfig, requestSort, clas
       scope={scope}
       className={`px-3 py-2 text-left text-xs font-medium ${theme.text.muted} uppercase tracking-wider cursor-pointer select-none hover:${theme.bg.hover} transition-colors ${className}`}
       onClick={() => requestSort(sortKey)}
-      aria-sort={isSorted ? sortConfig.direction : 'none'}
+      aria-sort={isSorted ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
       <div className="flex items-center group">
         <span className="mr-1">{children}</span>

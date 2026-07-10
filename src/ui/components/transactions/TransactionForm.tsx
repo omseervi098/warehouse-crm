@@ -80,7 +80,6 @@ const TransactionForm: React.FC<TransactionFormProps> = ({
   };
 
   const normalizeFinancialYear = (value: string) => value.replace(/\s+/g, '').trim();
-  const getDisplayedLotSuffix = (lotNumber: string) => lotNumber.split('|').pop() || '';
 
   const getLotFinancialYear = (index: number) =>
     usesLotFinancialYear ? (lotFinancialYears[index] || getFinancialYearString(newTransaction.date)) : getFinancialYearString(newTransaction.date);
