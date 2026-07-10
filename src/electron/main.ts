@@ -1,0 +1,3221 @@
+import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron';
+import { EJSON } from 'bson';
+import dotenv from 'dotenv';
+import keytar from 'keytar';
+import mongoose from 'mongoose';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
+import Bill from './models/bill.js';
+import Company from './models/company.js';
+import Item from './models/item.js';
+import Party from "./models/party.js";
+import Payment from './models/payment.js';
+import Stock from './models/stock.js';
+import Transaction from './models/transaction.js';
+import Unit from './models/unit.js';
+import Warehouse from './models/warehouse.js';
+import { getAssetsPath, getPdfPreviewPreloadPath, getPreloadPath, getUIPath } from './pathResolver.js';
+import { isDev, validateEventFrame } from './utils.js';
+import { computeChargesForLot } from './utils/charge.js';
+import { ChargeService } from './utils/chargeService.js';
+import { create as createDoc, deleteByID, getALL, updateByID } from './utils/common.js';
+import { CryptoService } from './utils/crypto.js';
+import DataDecryptionService, { DecryptionProgress } from './utils/dataDecryptionService.js';
+import EmailConfigManager from './utils/emailConfigManager.js';
+import EmailService from './utils/emailService.js';
+import MongooseEncryptionMiddleware from './utils/encryptionMiddleware.js';
+import { verifyEncryptionAgainstCompanyProfile } from './utils/encryptionVerify.js';
+import { KeyManager } from './utils/keyManager.js';
+import { KeyRotationService, type MigrationProgress } from './utils/keyRotationService.js';
+import { buildFilterQuery, handleFilteredQuery } from './utils/queryHandler.js';
+import ReportGenerator from './utils/reportGenerator.js';
+import { recalculateStock } from './utils/stock.js';
+const require = createRequire(import.meta.url);
+// Use CJS require for modules lacking type declarations
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const AdmZip: any = require('adm-zip');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const Papa: any = require('papaparse');
+
+if (app.isPackaged) {
+    dotenv.config({ path: path.join(process.resourcesPath, '.env') });
+} else {
+    dotenv.config();
+}
+
+let autoUpdater: any;
+try {
+    // Prefer CJS require which is the canonical export format of electron-updater
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('electron-updater');
+    autoUpdater = mod?.autoUpdater || mod?.default?.autoUpdater;
+} catch {
+    try {
+        const mod: any = await import('electron-updater');
+        autoUpdater = mod?.autoUpdater || mod?.default?.autoUpdater;
+    } catch { }
+}
+
+function toPlain<T>(value: T): T {
+    return value == null ? (value as T) : JSON.parse(JSON.stringify(value));
+}
+
+type NormalizedPaymentFor = 'bill_payment' | 'rent';
+
+function normalizePaymentFor(paymentFor?: string): NormalizedPaymentFor {
+    return paymentFor === 'rent' ? 'rent' : 'bill_payment';
+}
+
+function isRentPayment(paymentFor?: string): boolean {
+    return normalizePaymentFor(paymentFor) === 'rent';
+}
+
+function setupAutoUpdater(mainWindow: BrowserWindow, tray: Tray) {
+    if (!autoUpdater) {
+        // Updater module couldn't be loaded; skip wiring and let UI handle messaging
+        return;
+    }
+    // Configure updater behavior
+    autoUpdater.autoDownload = false; // ask user before downloading
+    autoUpdater.autoInstallOnAppQuit = true;
+
+    autoUpdater.on('error', (err: any) => {
+        dialog.showErrorBox('Auto Update Error', (err && (err as any).message) || String(err));
+    });
+
+    autoUpdater.on('checking-for-update', () => {
+        // Optional: feedback to user
+        mainWindow.webContents.send('autoUpdater:status', { status: 'checking' });
+    });
+
+    autoUpdater.on('update-not-available', () => {
+        mainWindow.webContents.send('autoUpdater:status', { status: 'no-update' });
+    });
+
+    autoUpdater.on('update-available', (info: any) => {
+        mainWindow.webContents.send('autoUpdater:status', { status: 'update-available', info });
+        dialog.showMessageBox(mainWindow, {
+            type: 'info',
+            buttons: ['Download', 'Later'],
+            defaultId: 0,
+            cancelId: 1,
+            message: `Version ${info?.version || ''} is available. Download now?`
+        }).then(({ response }) => {
+            if (response === 0) {
+                try { autoUpdater.downloadUpdate().catch(() => { }); } catch { }
+            }
+        });
+    });
+
+    autoUpdater.on('download-progress', (progress: any) => {
+        mainWindow.webContents.send('autoUpdater:progress', progress);
+    });
+
+    autoUpdater.on('update-downloaded', (info: any) => {
+        mainWindow.webContents.send('autoUpdater:status', { status: 'downloaded', info });
+        dialog.showMessageBox(mainWindow, {
+            type: 'question',
+            buttons: ['Install and Restart', 'Later'],
+            defaultId: 0,
+            cancelId: 1,
+            message: 'Update downloaded. Do you want to install and restart now?'
+        }).then(({ response }) => {
+            if (response === 0) {
+                setImmediate(() => autoUpdater.quitAndInstall());
+            }
+        });
+    });
+}
+
+const KEYTAR_SERVICE = 'warehouse-crm';
+const KEYTAR_ACCOUNT_MONGO_URI = 'MONGO_URI';
+const LEGACY_KEYTAR_SERVICE_AUTO_BACKUP = 'WarehouseCRM';
+const KEYTAR_ACCOUNT_AUTO_BACKUP = 'AutoBackup';
+
+type AutoBackupConfig = {
+    frequency: string;
+    directory: string;
+    lastRunAt?: string | null;
+    lastSuccessAt?: string | null;
+    lastError?: string | null;
+    lastBackupPath?: string | null;
+};
+
+async function initMongo() {
+    // Prefer secure storage via keytar. Fallback to env for development convenience.
+    const fromKeytar = await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_MONGO_URI);
+    const mongoUri = fromKeytar || process.env.MONGO_URI;
+    if (!mongoUri) return false;
+    if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(mongoUri, {
+            family: 4,
+            serverSelectionTimeoutMS: 10000,
+        });
+    }
+    return true;
+}
+
+function normalizeAutoBackupConfig(raw: any): AutoBackupConfig {
+    return {
+        frequency: raw?.frequency || 'never',
+        directory: raw?.directory || '',
+        lastRunAt: raw?.lastRunAt || null,
+        lastSuccessAt: raw?.lastSuccessAt || null,
+        lastError: raw?.lastError || null,
+        lastBackupPath: raw?.lastBackupPath || null,
+    };
+}
+
+async function readAutoBackupConfig(): Promise<AutoBackupConfig | null> {
+    const configStr = await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_AUTO_BACKUP)
+        || await keytar.getPassword(LEGACY_KEYTAR_SERVICE_AUTO_BACKUP, KEYTAR_ACCOUNT_AUTO_BACKUP);
+    if (!configStr) return null;
+    return normalizeAutoBackupConfig(JSON.parse(configStr));
+}
+
+async function writeAutoBackupConfig(config: AutoBackupConfig): Promise<void> {
+    await keytar.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_AUTO_BACKUP, JSON.stringify(config));
+}
+
+async function validateBackupDirectory(dirPath: string): Promise<void> {
+    const trimmedPath = dirPath.trim();
+    if (!trimmedPath) throw new Error('Backup directory is required.');
+
+    await fs.promises.mkdir(trimmedPath, { recursive: true });
+    await fs.promises.access(trimmedPath, fs.constants.W_OK);
+
+    const probePath = path.join(trimmedPath, `.warehouse-crm-backup-check-${Date.now()}.tmp`);
+    await fs.promises.writeFile(probePath, 'backup-check');
+    await fs.promises.unlink(probePath);
+}
+
+async function updateAutoBackupStatus(updates: Partial<AutoBackupConfig>): Promise<AutoBackupConfig | null> {
+    const current = await readAutoBackupConfig();
+    if (!current) return null;
+    const nextConfig = normalizeAutoBackupConfig({ ...current, ...updates });
+    await writeAutoBackupConfig(nextConfig);
+    return nextConfig;
+}
+
+
+
+function registerIpcHandlers() {
+    // Secure storage helpers for Mongo URI
+    ipcMain.handle('secure:hasMongoUri', async () => {
+        const existing = await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_MONGO_URI);
+        return { ok: true, data: Boolean(existing) };
+    });
+    ipcMain.handle('secure:setMongoUri', async (_e, uri: string) => {
+        try {
+            if (typeof uri !== 'string' || !uri.trim()) {
+                return { ok: false, error: 'Invalid Mongo URI' };
+            }
+            validateEventFrame(_e.senderFrame);
+            await keytar.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_MONGO_URI, uri.trim());
+            // Try connecting immediately to validate
+            if (mongoose.connection.readyState === 1) {
+                await mongoose.disconnect();
+            }
+            await mongoose.connect(uri.trim());
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+    ipcMain.handle('secure:clearMongoUri', async () => {
+        try {
+            await keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT_MONGO_URI);
+            if (mongoose.connection.readyState === 1) {
+                await mongoose.disconnect();
+            }
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Encryption key management handlers
+    ipcMain.handle('encryption:hasKey', async () => {
+        try {
+            const hasKey = await KeyManager.hasEncryptionKey();
+            return { ok: true, data: hasKey };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:setKey', async (_e, password: string) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+            if (!password || typeof password !== 'string') {
+                return { ok: false, error: 'Invalid password provided' };
+            }
+            if (password.length < 8) {
+                return { ok: false, error: 'Password must be at least 8 characters long' };
+            }
+            if (await KeyManager.hasEncryptionKey()) {
+                return { ok: false, error: 'Encryption already enabled. Use key rotation.' };
+            }
+            if (!(await initMongo())) {
+                return { ok: false, error: 'MongoDB is not connected.' };
+            }
+
+            await KeyManager.setEncryptionKeyFromPassword(password);
+            const verification = await verifyEncryptionAgainstCompanyProfile();
+            if (!verification.passed) {
+                try { await KeyManager.clearEncryptionKey(); } catch { }
+                return { ok: false, error: verification.message, data: { verification } };
+            }
+            return { ok: true, data: { verification } };
+        } catch (err: any) {
+            try { await KeyManager.clearEncryptionKey(); } catch { }
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:rotateKey', async (_e, newPassword: string) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (!newPassword || typeof newPassword !== 'string') {
+                return { ok: false, error: 'Invalid new password provided' };
+            }
+
+            if (newPassword.length < 8) {
+                return { ok: false, error: 'New password must be at least 8 characters long' };
+            }
+
+            // Generate new key from password using fixed salt
+            const newKey = CryptoService.deriveKey(newPassword);
+
+            await KeyManager.rotateKey(newKey);
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:getMetadata', async () => {
+        try {
+            const metadata = await KeyManager.getKeyMetadata();
+            const isRotationRecommended = await KeyManager.isRotationRecommended();
+
+            return {
+                ok: true,
+                data: metadata ? {
+                    ...metadata,
+                    isRotationRecommended
+                } : null
+            };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Data decryption service for clearing encryption
+    let currentDecryptionService: DataDecryptionService | null = null;
+
+    ipcMain.handle('encryption:clearKey', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            // First decrypt all data to plain text
+            currentDecryptionService = new DataDecryptionService();
+
+            // Set up progress callback to send updates to renderer
+            const wrappedProgressCallback = (progress: DecryptionProgress) => {
+                _e.sender.send('encryption:decryptionProgress', progress);
+            };
+
+            const result = await currentDecryptionService.decryptAllData(wrappedProgressCallback);
+
+            if (result.status === 'completed') {
+                // Only clear the key if decryption was successful
+                await KeyManager.clearEncryptionKey();
+                currentDecryptionService = null;
+                return { ok: true, data: result };
+            } else {
+                currentDecryptionService = null;
+                return { ok: false, error: 'Failed to decrypt data before clearing key', data: result };
+            }
+        } catch (err: any) {
+            currentDecryptionService = null;
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:cancelDecryption', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (currentDecryptionService) {
+                currentDecryptionService.cancelDecryption();
+                return { ok: true };
+            }
+
+            return { ok: false, error: 'No decryption in progress' };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:getDecryptionProgress', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (currentDecryptionService) {
+                const progress = currentDecryptionService.getProgress();
+                return { ok: true, data: progress };
+            }
+
+            return { ok: false, error: 'No decryption in progress' };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:validateKeyStrength', async () => {
+        try {
+            const isValid = await KeyManager.validateKeyStrength();
+            return { ok: true, data: isValid };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Key rotation with data migration handlers
+    let currentRotationService: KeyRotationService | null = null;
+
+    ipcMain.handle('encryption:rotateKeyWithMigration', async (_e, newPassword: string, progressCallback?: (progress: MigrationProgress) => void) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (!newPassword || typeof newPassword !== 'string') {
+                return { ok: false, error: 'Invalid new password provided' };
+            }
+
+            if (newPassword.length < 8) {
+                return { ok: false, error: 'New password must be at least 8 characters long' };
+            }
+
+            // Generate new key from password using fixed salt for multi-device compatibility
+            const newKey = CryptoService.deriveKey(newPassword);
+
+            // Create rotation service
+            currentRotationService = new KeyRotationService();
+
+            // Set up progress callback to send updates to renderer
+            const wrappedProgressCallback = (progress: MigrationProgress) => {
+                _e.sender.send('encryption:migrationProgress', progress);
+                if (progressCallback) {
+                    progressCallback(progress);
+                }
+            };
+
+            // Start rotation and migration
+            const keyUpdateCallback = async () => {
+                await KeyManager.rotateKey(newKey);
+            };
+            const result = await currentRotationService.rotateKeyAndMigrateData(newKey, wrappedProgressCallback, keyUpdateCallback);
+
+            // Clear the service reference
+            currentRotationService = null;
+
+            return { ok: true, data: result };
+        } catch (err: any) {
+            currentRotationService = null;
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:cancelMigration', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (currentRotationService) {
+                currentRotationService.cancelMigration();
+                return { ok: true };
+            }
+
+            return { ok: false, error: 'No migration in progress' };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:rollbackMigration', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (currentRotationService) {
+                await currentRotationService.rollbackMigration();
+                return { ok: true };
+            }
+
+            return { ok: false, error: 'No migration service available for rollback' };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('encryption:getMigrationProgress', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (currentRotationService) {
+                const progress = currentRotationService.getProgress();
+                return { ok: true, data: progress };
+            }
+
+            return { ok: false, error: 'No migration in progress' };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Email configuration handlers
+    ipcMain.handle('email:hasConfig', async () => {
+        try {
+            const hasConfig = await EmailConfigManager.hasConfig();
+            return { ok: true, data: hasConfig };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:getConfig', async () => {
+        try {
+            const config = await EmailConfigManager.getConfig();
+            // Don't return the app password for security
+            if (config) {
+                return {
+                    ok: true,
+                    data: {
+                        gmailAddress: config.gmailAddress,
+                        enabled: config.enabled,
+                        hasPassword: Boolean(config.appPassword)
+                    }
+                };
+            }
+            return { ok: true, data: null };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:setConfig', async (_e, config: { gmailAddress: string; appPassword: string; enabled: boolean }) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (!config.gmailAddress || !config.appPassword) {
+                return { ok: false, error: 'Gmail address and app password are required' };
+            }
+
+            // Validate configuration format
+            if (!EmailConfigManager.validateConfigFormat(config)) {
+                return { ok: false, error: 'Invalid email configuration format' };
+            }
+
+            await EmailConfigManager.setConfig(config);
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:setEnabled', async (_e, enabled: boolean) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+            await EmailConfigManager.setEnabled(enabled);
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:testConfig', async (_e, config?: { gmailAddress: string; appPassword: string; enabled: boolean }) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+            const testResult = await EmailConfigManager.testConfig(config);
+            return { ok: true, data: testResult };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:clearConfig', async (_e) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+            await EmailConfigManager.clearConfig();
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Email sending handlers
+    ipcMain.handle('email:sendOutwardReport', async (_e, { batchId, partyId }: { batchId: string; partyId: string }) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (!batchId || !partyId) {
+                return { ok: false, error: 'Batch ID and party ID are required' };
+            }
+            // Get email configuration
+            const emailConfig = await EmailConfigManager.getConfig();
+            if (!emailConfig || !emailConfig.enabled) {
+                return { ok: false, error: 'Email is not configured or disabled' };
+            }
+
+            // Get party information for recipient email
+            const party = await Party.findById(partyId).lean() as any;
+            if (!party) {
+                return { ok: false, error: 'Party not found' };
+            }
+
+            if (!party.orgEmail) {
+                return { ok: false, error: 'Party does not have an organization email address' };
+            }
+
+            // Generate report content
+            const reportContent = await ReportGenerator.generateOutwardReport(batchId, partyId);
+
+            // Configure and send email
+            const emailService = new EmailService();
+            await emailService.configure(emailConfig);
+            const emailResult = await emailService.sendEmail({
+                to: party.orgEmail,
+                subject: reportContent.subject,
+                html: reportContent.html,
+                attachments: reportContent.attachments
+            });
+            if (emailResult.success) {
+                return { ok: true, data: { messageId: emailResult.messageId } };
+            } else {
+                return { ok: false, error: emailResult.error || 'Failed to send email' };
+            }
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('email:sendMonthlyReport', async (_e, { month, year, partyId }: { month: number; year: number; partyId: string }) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+
+            if (!month || !year || !partyId) {
+                return { ok: false, error: 'Month, year, and party ID are required' };
+            }
+
+            if (month < 1 || month > 12) {
+                return { ok: false, error: 'Month must be between 1 and 12' };
+            }
+
+            // Get email configuration
+            const emailConfig = await EmailConfigManager.getConfig();
+            if (!emailConfig || !emailConfig.enabled) {
+                return { ok: false, error: 'Email is not configured or disabled' };
+            }
+
+            // Get party information for recipient email
+            const party = await Party.findById(partyId).lean() as any;
+            if (!party) {
+                return { ok: false, error: 'Party not found' };
+            }
+
+            if (!party.orgEmail) {
+                return { ok: false, error: 'Party does not have an organization email address' };
+            }
+
+            // Generate report content
+            const reportContent = await ReportGenerator.generateMonthlyStockReport(month, year, partyId);
+
+            // Configure and send email
+            const emailService = new EmailService();
+            await emailService.configure(emailConfig);
+
+            const emailResult = await emailService.sendEmail({
+                to: party.orgEmail,
+                subject: reportContent.subject,
+                html: reportContent.html,
+                attachments: reportContent.attachments
+            });
+
+            if (emailResult.success) {
+                return { ok: true, data: { messageId: emailResult.messageId } };
+            } else {
+                return { ok: false, error: emailResult.error || 'Failed to send email' };
+            }
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('db:ensureConnected', async () => {
+        try {
+            const ok = await initMongo();
+            if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
+            return { ok: true };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('db:listCollections', async () => {
+        try {
+            const ok = await initMongo();
+            if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
+            const db = mongoose.connection.db;
+            if (!db) return { ok: false, error: 'Database not initialized' };
+            const collections = await db.listCollections().toArray();
+            const names = (collections || [])
+                .map((c: any) => c.name)
+                .filter((n: string) => n && !n.startsWith('system.'));
+            return { ok: true, data: names };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('db:dropCollections', async (_e, names: string[]) => {
+        try {
+            const ok = await initMongo();
+            if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
+            validateEventFrame(_e.senderFrame);
+            if (!Array.isArray(names) || names.length === 0) return { ok: false, error: 'No collections provided' };
+            const db = mongoose.connection.db;
+            if (!db) return { ok: false, error: 'Database not initialized' };
+            const dropped: string[] = [];
+            const failed: { name: string; error: string }[] = [];
+            for (const name of names) {
+                if (!name || typeof name !== 'string' || name.startsWith('system.')) continue;
+                try {
+                    // If collection does not exist, skip
+                    const exists = await db.listCollections({ name }).hasNext();
+                    if (!exists) continue;
+                    await db.dropCollection(name);
+                    dropped.push(name);
+                } catch (e: any) {
+                    failed.push({ name, error: e?.message || String(e) });
+                }
+            }
+            return { ok: true, data: { dropped, failed } };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+    // Import collections from a ZIP (EJSON, JSON, or CSV files inside)
+    ipcMain.handle('db:importCollections', async (_e) => {
+        try {
+            const ok = await initMongo();
+            if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
+            validateEventFrame(_e.senderFrame);
+            const { canceled, filePaths } = await dialog.showOpenDialog({
+                title: 'Select Collections ZIP',
+                filters: [{ name: 'ZIP Archive', extensions: ['zip'] }],
+                properties: ['openFile']
+            });
+            if (canceled || !filePaths || filePaths.length === 0) return { ok: false, error: 'Import canceled' };
+            const zipPath = filePaths[0];
+
+            const db = mongoose.connection.db;
+            if (!db) return { ok: false, error: 'Database not initialized' };
+
+            const zip = new AdmZip(zipPath);
+            const entries = zip.getEntries() || [];
+
+            const summary: { imported: { name: string; count: number }[]; skipped: { name: string; reason: string }[]; failed: { name: string; error: string }[] } = { imported: [], skipped: [], failed: [] };
+
+            for (const entry of entries) {
+                if (entry.isDirectory) continue;
+                const base = path.basename(entry.entryName);
+                const ext = base.toLowerCase().endsWith('.ejson')
+                    ? 'ejson'
+                    : base.toLowerCase().endsWith('.json')
+                        ? 'json'
+                        : base.toLowerCase().endsWith('.csv')
+                            ? 'csv'
+                            : '';
+                if (!ext) continue; // unsupported
+                const name = base.replace(/\.(ejson|json|csv)$/i, '');
+                if (!name || name.startsWith('system.')) { summary.skipped.push({ name: base, reason: 'Invalid or system collection' }); continue; }
+
+                try {
+                    const content = entry.getData().toString('utf8');
+                    let docs: any[] = [];
+                    if (ext === 'ejson') {
+                        try { docs = EJSON.parse(content, { relaxed: false }); } catch { throw new Error('Invalid EJSON'); }
+                        if (!Array.isArray(docs)) { throw new Error('EJSON must be an array of documents'); }
+                    } else if (ext === 'json') {
+                        try { docs = JSON.parse(content); } catch (e: any) { throw new Error('Invalid JSON'); }
+                        if (!Array.isArray(docs)) { throw new Error('JSON must be an array of documents'); }
+                    } else {
+                        const parsed = Papa.parse(content, { header: true, skipEmptyLines: true });
+                        if (parsed.errors && parsed.errors.length > 0) {
+                            // Continue with parsed data but note errors
+                        }
+                        docs = (parsed.data as any[]) || [];
+                    }
+                    if (ext !== 'ejson') {
+                        // Legacy JSON/CSV imports need best-effort coercion of IDs and dates.
+                        const toObjectIdMaybe = (v: any) => {
+                            if (typeof v === 'string' && /^[a-fA-F0-9]{24}$/.test(v)) {
+                                try { return new (mongoose as any).Types.ObjectId(v); } catch { return v; }
+                            }
+                            return v;
+                        };
+                        const isIsoDateString = (s: string) => /^(\d{4}-\d{2}-\d{2})([Tt ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?)?([Zz]|[+\-]\d{2}:?\d{2})?$/.test(s);
+                        const fixDates = (obj: any): any => {
+                            if (obj == null) return obj;
+                            if (typeof obj === 'string') {
+                                return isIsoDateString(obj) ? new Date(obj) : obj;
+                            }
+                            if (Array.isArray(obj)) return obj.map(fixDates);
+                            if (typeof obj === 'object') {
+                                const out: any = {};
+                                for (const [k, v] of Object.entries(obj)) {
+                                    if (k === '_id') { out[k] = toObjectIdMaybe(v); continue; }
+                                    if (typeof v === 'string' && (/(date|at)$/i.test(k) || isIsoDateString(v))) {
+                                        const d = new Date(v);
+                                        out[k] = isNaN(d.getTime()) ? v : d;
+                                    } else {
+                                        out[k] = fixDates(v);
+                                    }
+                                }
+                                return out;
+                            }
+                            return obj;
+                        };
+                        docs = docs.map((d: any) => fixDates(d));
+                    }
+
+                    const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                    if (Model && Model.schema) {
+                        const middleware = new MongooseEncryptionMiddleware();
+                        for (const doc of docs) {
+                             await middleware.encryptFields(doc, Model.schema);
+                        }
+                    }
+
+                    if (!docs || docs.length === 0) { summary.skipped.push({ name, reason: 'No documents' }); continue; }
+                    let count = docs.length;
+                    if (Model) {
+                        // Insert through Mongoose so array-typed encrypted fields keep
+                        // the same persisted shape as normal application writes.
+                        const insertedDocs = await (Model as any).insertMany(docs, { ordered: false });
+                        count = Array.isArray(insertedDocs) ? insertedDocs.length : docs.length;
+                    } else {
+                        const coll = db.collection(name);
+                        const res = await coll.insertMany(docs, { ordered: false });
+                        count = (res && (res as any).insertedCount) || docs.length;
+                    }
+                    summary.imported.push({ name, count });
+                } catch (e: any) {
+                    summary.failed.push({ name, error: e?.message || String(e) });
+                }
+            }
+
+            return { ok: true, data: summary };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Export selected collections to a ZIP (EJSON, JSON, or CSV)
+    ipcMain.handle('db:exportCollections', async (_e, args: { names: string[]; format: 'ejson' | 'json' | 'csv' }) => {
+        try {
+            const ok = await initMongo();
+            if (!ok) return { ok: false, error: 'Missing MONGO_URI. Use secure.setMongoUri first.' };
+            validateEventFrame(_e.senderFrame);
+            const names = Array.isArray(args?.names) ? args.names.filter(n => typeof n === 'string' && !n.startsWith('system.') && n.trim() !== '') : [];
+            const format = (args?.format === 'csv' || args?.format === 'json' || args?.format === 'ejson' ? args.format : 'ejson') as 'ejson' | 'json' | 'csv';
+            if (names.length === 0) return { ok: false, error: 'No collections provided' };
+            const db = mongoose.connection.db;
+            if (!db) return { ok: false, error: 'Database not initialized' };
+
+            const zip = new AdmZip();
+            for (const name of names) {
+                const exists = await db.listCollections({ name }).hasNext();
+                if (!exists) continue;
+                const coll = db.collection(name);
+                const docs = await coll.find({}).toArray();
+                
+                const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                if (Model && Model.schema) {
+                    const middleware = new MongooseEncryptionMiddleware();
+                    for (const doc of docs) {
+                         await middleware.decryptFields(doc, Model.schema);
+                    }
+                }
+                
+                let content = '';
+                let fileName = '';
+                if (format === 'ejson') {
+                    content = EJSON.stringify(docs, undefined, 2, { relaxed: false });
+                    fileName = `${name}.ejson`;
+                } else if (format === 'json') {
+                    content = JSON.stringify(docs, null, 2);
+                    fileName = `${name}.json`;
+                } else {
+                    try {
+                        // Best-effort CSV: Papa will stringify primitives; nested objects become [object Object]
+                        content = Papa.unparse(docs as any);
+                    } catch {
+                        // Fallback: JSON lines if CSV fails
+                        content = docs.map(d => JSON.stringify(d)).join(os.EOL);
+                    }
+                    fileName = `${name}.csv`;
+                }
+                zip.addFile(fileName, Buffer.from(content, 'utf8'));
+            }
+
+            // Ask user where to save
+            const when = new Date();
+            const stamp = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, '0')}-${String(when.getDate()).padStart(2, '0')}_${String(when.getHours()).padStart(2, '0')}${String(when.getMinutes()).padStart(2, '0')}`;
+            const defaultPath = path.join(app.getPath('documents') || app.getPath('downloads'), `collections_export_${stamp}.zip`);
+            const { canceled, filePath } = await dialog.showSaveDialog({
+                title: 'Save Collections Export',
+                defaultPath,
+                filters: [{ name: 'ZIP Archive', extensions: ['zip'] }]
+            });
+            if (canceled || !filePath) return { ok: false, error: 'Export canceled' };
+
+            // Write zip
+            const tmpPath = path.join(app.getPath('temp'), `export_${Date.now()}.zip`);
+            zip.writeZip(tmpPath);
+            await fs.promises.copyFile(tmpPath, filePath);
+            try { await fs.promises.unlink(tmpPath); } catch { }
+            return { ok: true, data: { savedTo: filePath } };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // --- Backup Extraction Utility ---
+    const generateBackupZipPath = async (dirPath: string): Promise<string | null> => {
+        try {
+            await initMongo();
+            const nativeDb = mongoose.connection.db;
+            if (!nativeDb) throw new Error('DB not initialized');
+            const collections = await nativeDb.listCollections().toArray();
+            const names = collections.map((c: any) => c.name);
+            
+            const zip = new AdmZip();
+            for (const name of names) {
+                const coll = nativeDb.collection(name);
+                const docs = await coll.find({}).toArray();
+                const Model = Object.values(mongoose.models).find(m => m.collection.name === name);
+                if (Model && Model.schema) {
+                    const middleware = new MongooseEncryptionMiddleware();
+                    for (const doc of docs) {
+                         await middleware.decryptFields(doc, Model.schema);
+                    }
+                }
+                const content = EJSON.stringify(docs, undefined, 2, { relaxed: false });
+                zip.addFile(`${name}.ejson`, Buffer.from(content, 'utf8'));
+            }
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const finalPath = path.join(dirPath, `autobackup_${stamp}.zip`);
+            zip.writeZip(finalPath);
+            return finalPath;
+        } catch(e) { console.error('Backup generation error:', e); return null; }
+    };
+
+    // Auto Backup API Handlers
+    ipcMain.handle('autobackup:getConfig', async () => {
+        try {
+            const config = await readAutoBackupConfig();
+            if (config) {
+                return { ok: true, data: config };
+            }
+            return { ok: true, data: null };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:setConfig', async (_e, config: { frequency: string, directory: string }) => {
+        try {
+            const nextConfig = normalizeAutoBackupConfig({
+                ...(await readAutoBackupConfig()),
+                frequency: config.frequency,
+                directory: config.directory.trim(),
+            });
+            if (nextConfig.frequency !== 'never') {
+                await validateBackupDirectory(nextConfig.directory);
+            }
+            await writeAutoBackupConfig(nextConfig);
+            await setupBackupCron();
+            return { ok: true, data: nextConfig };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:selectDirectory', async () => {
+        try {
+            const { canceled, filePaths } = await dialog.showOpenDialog({
+                title: 'Select Backup Directory',
+                properties: ['openDirectory', 'createDirectory']
+            });
+            if (canceled || filePaths.length === 0) return { ok: false, error: 'Canceled' };
+            return { ok: true, data: filePaths[0] };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('autobackup:triggerBackup', async () => {
+        try {
+            const config = await readAutoBackupConfig();
+            if (!config) throw new Error('Backup is not configured.');
+            if (!config.directory) throw new Error('Backup directory is not configured.');
+            await validateBackupDirectory(config.directory);
+            await updateAutoBackupStatus({
+                lastRunAt: new Date().toISOString(),
+                lastError: null,
+            });
+            const zipPath = await generateBackupZipPath(config.directory);
+            if (zipPath) {
+                await updateAutoBackupStatus({
+                    lastRunAt: new Date().toISOString(),
+                    lastSuccessAt: new Date().toISOString(),
+                    lastError: null,
+                    lastBackupPath: zipPath,
+                });
+                return { ok: true, data: zipPath };
+            }
+            throw new Error('Failed to generate backup zip.');
+        } catch (e: any) {
+            await updateAutoBackupStatus({
+                lastRunAt: new Date().toISOString(),
+                lastError: e.message,
+            });
+            return { ok: false, error: e.message };
+        }
+    });
+
+    // --- CRON SCHEDULING ---
+    let activeCronTask: any = null;
+    const setupBackupCron = async () => {
+        try {
+            const cron = (await import('node-cron')).default;
+            if (activeCronTask) {
+                activeCronTask.stop();
+                activeCronTask = null;
+            }
+            const config = await readAutoBackupConfig();
+            if (config) {
+                if (config.frequency && config.frequency !== 'never' && config.directory) {
+                    let expr = '0 0 * * *'; // daily
+                    if (config.frequency === 'weekly') expr = '0 0 * * 0'; // Sundays
+                    else if (config.frequency === 'monthly') expr = '0 0 1 * *'; // 1st of month
+
+                    activeCronTask = cron.schedule(expr, async () => {
+                        const runAt = new Date().toISOString();
+                        try {
+                            await validateBackupDirectory(config.directory);
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastError: null,
+                            });
+                            const zipPath = await generateBackupZipPath(config.directory);
+                            if (!zipPath) throw new Error('Failed to generate backup zip.');
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastSuccessAt: new Date().toISOString(),
+                                lastError: null,
+                                lastBackupPath: zipPath,
+                            });
+                        } catch (error: any) {
+                            await updateAutoBackupStatus({
+                                lastRunAt: runAt,
+                                lastError: error?.message || 'Scheduled backup failed.',
+                            });
+                        }
+                    });
+                }
+            }
+        } catch (e) { console.error('[Cron Init Error]', e); }
+    };
+
+    // run setup once lazily to avoid holding up the process
+    setTimeout(setupBackupCron, 5000);
+
+
+    ipcMain.handle('company:get', async () => {
+        try {
+            await initMongo();
+            const company = await Company.findOne();
+
+            if (company) {
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(company, Company.schema);
+            }
+
+            return { ok: true, data: toPlain(company) || null };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('company:update', async (_e, args: { id: string; updates: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const { id, updates } = args || {} as any;
+            const updated = await Company.findOneAndUpdate({ _id: new mongoose.Types.ObjectId(id) }, updates, { new: true });
+            if (!updated) return { ok: false, error: 'Company not found' };
+
+            const middleware = new MongooseEncryptionMiddleware();
+            await middleware.decryptFields(updated, Company.schema);
+
+            return { ok: true, data: toPlain(updated) };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('company:create', async (_e, payload: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const doc = new Company(payload);
+            await doc.save();
+
+            const middleware = new MongooseEncryptionMiddleware();
+            await middleware.decryptFields(doc, Company.schema);
+
+            return { ok: true, data: toPlain(doc) };
+        } catch (err: any) {
+            return { ok: false, error: err.message };
+        }
+    });
+
+    // Helper function to decrypt Party data in aggregation results
+    async function decryptPartyInAggregationResult(result: any): Promise<void> {
+        if (!result || !result.party) return;
+
+        const middleware = new MongooseEncryptionMiddleware();
+        await middleware.decryptFields(result.party, Party.schema);
+    }
+
+    // Helper function to decrypt Party data in array of aggregation results
+    async function decryptPartiesInAggregationResults(results: any[]): Promise<void> {
+        if (!Array.isArray(results)) return;
+
+        for (const result of results) {
+            await decryptPartyInAggregationResult(result);
+        }
+    }
+
+    // Parties CRUD
+    ipcMain.handle('parties:getAll', async () => {
+        try {
+            await initMongo();
+            const data = await Party.find();
+
+            // Manual decryption to ensure it works
+            const middleware = new MongooseEncryptionMiddleware();
+            for (const doc of data) {
+                await middleware.decryptFields(doc, Party.schema);
+            }
+
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+    ipcMain.handle('parties:getById', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const data = await Party.findById(id);
+
+            if (data) {
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(data, Party.schema);
+            }
+
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+    ipcMain.handle('parties:getByName', async (_e, name: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const data = await Party.findOne({ name });
+
+            if (data) {
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(data, Party.schema);
+            }
+
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+    ipcMain.handle('parties:create', async (_e, payload: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const data = await createDoc(Party, payload);
+
+            if (data) {
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(data, Party.schema);
+            }
+
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+    ipcMain.handle('parties:update', async (_e, args: { id: string, updates: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const data = await updateByID(Party, args.id, args.updates);
+
+            if (data) {
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(data, Party.schema);
+            }
+
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+    ipcMain.handle('parties:delete', async (_e, id: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await deleteByID(Party, id); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Items CRUD
+    ipcMain.handle('items:getAll', async () => {
+        try { await initMongo(); const data = await Item.find(); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('items:getById', async (_e, id: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await Item.findById(id); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('items:getByName', async (_e, name: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await Item.findOne({ name }); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('items:create', async (_e, payload: any) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await createDoc(Item, payload); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('items:update', async (_e, args: { id: string, updates: any }) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await updateByID(Item, args.id, args.updates); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('items:delete', async (_e, id: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await deleteByID(Item, id); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Units CRUD
+    ipcMain.handle('units:getAll', async () => {
+        try { await initMongo(); const data = await Unit.find(); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('units:getById', async (_e, id: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await Unit.findById(id); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('units:getByName', async (_e, name: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await Unit.findOne({ name }); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('units:create', async (_e, payload: any) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await createDoc(Unit, payload); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('units:update', async (_e, args: { id: string, updates: any }) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await updateByID(Unit, args.id, args.updates); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('units:delete', async (_e, id: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await deleteByID(Unit, id); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Warehouses
+    ipcMain.handle('warehouse:getAll', async () => {
+        try { await initMongo(); const data = await getALL(Warehouse); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('warehouse:create', async (_e, payload: any) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); const data = await createDoc(Warehouse, payload); return { ok: true, data: toPlain(data) }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Transactions
+    ipcMain.handle('transactions:create', async (_e, body: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const { date, time, lotNumber, quantity } = body;
+            const actualQuantity = quantity - (body.shortage || 0) + (body.extra || 0);
+            if (actualQuantity <= 0) return { ok: false, error: 'Actual quantity must be greater than zero.' };
+            const warehouses = body.warehouses ? body.warehouses.map((id: string) => new mongoose.Types.ObjectId(id)) : [];
+            const tx = await Transaction.create({
+                ...body,
+                quantity: actualQuantity,
+                enteredAt: new Date(`${date}T${time}:00Z`),
+                party: new mongoose.Types.ObjectId(body.partyId),
+                item: new mongoose.Types.ObjectId(body.itemId),
+                unit: new mongoose.Types.ObjectId(body.unitId),
+                warehouses,
+            });
+            await recalculateStock(lotNumber);
+
+            const response = await Transaction.populate(tx, [
+                { path: 'party', select: 'name _id' },
+                { path: 'item', select: 'name category _id' },
+                { path: 'unit', select: 'name _id' },
+                { path: 'warehouses', select: 'name _id' },
+            ]);
+
+            return { ok: true, data: toPlain(response) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:update', async (_e, args: { id: string, body: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const { id, body } = args;
+            const { date, time, lotNumber } = body;
+            const oldTx = await Transaction.findById(id);
+            if (!oldTx) return { ok: false, error: 'Transaction not found' };
+            const oldLotNumber = (oldTx as any).lotNumber;
+            const oldQuantity = (oldTx as any).quantity + ((oldTx as any).shortage || 0) - ((oldTx as any).extra || 0);
+            const baseQuantity = body.quantity !== undefined ? Number(body.quantity) : oldQuantity;
+            const newQuantity = baseQuantity - (body.shortage || 0) + (body.extra || 0);
+            if (newQuantity <= 0) return { ok: false, error: 'Actual quantity must be greater than zero.' };
+            const newData = {
+                ...body,
+                quantity: newQuantity,
+                enteredAt: date && time ? new Date(`${date}T${time}:00Z`) : (oldTx as any).enteredAt,
+                party: body.partyId ? new mongoose.Types.ObjectId(body.partyId) : (oldTx as any).party,
+                item: body.itemId ? new mongoose.Types.ObjectId(body.itemId) : (oldTx as any).item,
+                unit: body.unitId ? new mongoose.Types.ObjectId(body.unitId) : (oldTx as any).unit,
+                warehouses: body.warehouses ? body.warehouses.map((id: string) => new mongoose.Types.ObjectId(id)) : (oldTx as any).warehouses,
+            };
+            const updatedTx = await Transaction.findByIdAndUpdate(id, newData, { new: true });
+            await recalculateStock(lotNumber);
+
+            if (oldLotNumber !== lotNumber) {
+                await recalculateStock(oldLotNumber);
+
+            }
+            const response = await Transaction.populate(updatedTx, [
+                { path: 'party', select: 'name _id' },
+                { path: 'item', select: 'name category _id' },
+                { path: 'unit', select: 'name _id' },
+                { path: 'warehouses', select: 'name _id' },
+            ]);
+            return { ok: true, data: toPlain(response) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:delete', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const tx = await Transaction.findById(id);
+            if (!tx) return { ok: false, error: 'Transaction not found' };
+            const lotNumber = (tx as any).lotNumber;
+            const deleted = await deleteByID(Transaction, id);
+            await recalculateStock(lotNumber);
+
+            return { ok: true, data: toPlain(deleted) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:getAll', async (_e, params: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const pipeline = [
+                { $lookup: { from: 'parties', localField: 'party', foreignField: '_id', as: 'party' } },
+                { $unwind: '$party' },
+                { $lookup: { from: 'items', localField: 'item', foreignField: '_id', as: 'item' } },
+                { $unwind: '$item' },
+                { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
+                { $unwind: '$unit' },
+                { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
+                { $project: { _id: 1, type: 1, date: 1, time: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, batchId: 1, lotNumber: 1, vehicleNumber: 1, doNumber: 1, quantity: 1, shortage: 1, extra: 1, charge: 1, unit: { name: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, remark: 1, enteredAt: 1 } }
+            ];
+            const { results: transactions, page, limit, total } = await handleFilteredQuery(params || {}, { model: Transaction, pipeline, dateFields: ['enteredAt', 'createdAt', 'updatedAt'] });
+
+            // Decrypt Party data in aggregation results
+            await decryptPartiesInAggregationResults(transactions);
+
+            return { ok: true, data: { transactions: toPlain(transactions), page, limit, total } };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:getById', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const data = await Transaction.findById(id);
+            return { ok: true, data: toPlain(data) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:lotNumbers', async (_e, search?: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); if (!search) { const lotNumbers = await Transaction.distinct('lotNumber'); return { ok: true, data: lotNumbers }; } const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); const regex = new RegExp(escaped, 'i'); const lotNumbers = await Transaction.distinct('lotNumber', { lotNumber: regex }); return { ok: true, data: lotNumbers }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:doNumbers', async (_e, search?: string) => {
+        try { await initMongo(); validateEventFrame(_e.senderFrame); if (!search) { const arr = await Transaction.distinct('doNumber'); return { ok: true, data: arr.filter((n: any) => n && n.trim() !== '') }; } const regex = new RegExp((search || '').trim(), 'i'); const arr = await Transaction.distinct('doNumber', { doNumber: regex }); return { ok: true, data: arr.filter((n: any) => n && n.trim() !== '') }; } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:gatepass', async (_e, batchId: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            if (!batchId) return { ok: false, error: 'Batch ID is required' };
+            const transactions = await Transaction.find({ batchId })
+                .populate('party', 'name')
+                .populate('item', 'name')
+                .populate('unit', 'name')
+                .populate('warehouses', 'name')
+                .sort({ enteredAt: 1, createdAt: 1 }).lean();
+            if (transactions.length === 0) return { ok: false, error: 'No transactions found for this Batch ID' };
+
+            // Manually decrypt Party data since .lean() bypasses middleware
+            const middleware = new MongooseEncryptionMiddleware();
+            for (const transaction of transactions) {
+                if (transaction.party) {
+                    await middleware.decryptFields(transaction.party, Party.schema);
+                }
+            }
+
+            const first = transactions[0];
+            const uniqueVehicleNumbers = [...new Set(transactions.map((t: any) => t.vehicleNumber))];
+            const stocks = await Stock.find({ lotNumber: { $in: transactions.map((t: any) => t.lotNumber) } }).lean();
+            const gatepassData = {
+                batchId: first.batchId,
+                doNumber: first.doNumber,
+                date: first.enteredAt,
+                party: first.party,
+                vehicleNumber: uniqueVehicleNumbers.join(', '),
+                items: transactions.map((t: any) => ({
+                    lotNumber: t.lotNumber,
+                    itemName: (t.item as any)?.name,
+                    quantity: t.quantity,
+                    balance: stocks.find((s: any) => s.lotNumber === t.lotNumber)?.quantity || 0,
+                    unitName: (t.unit as any)?.name,
+                    warehouses: (t.warehouses as any[]).map((w: any) => w.name).join(', '),
+                }))
+            };
+            return { ok: true, data: toPlain(gatepassData) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('transactions:createMany', async (_e, bodies: any[]) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            if (!Array.isArray(bodies) || bodies.length === 0) {
+                return { ok: false, error: 'At least one transaction is required.' };
+            }
+
+            const results: any[] = [];
+            const affectedLotNumbers = new Set<string>();
+
+            for (const body of bodies) {
+                const { date, time, lotNumber, quantity } = body;
+                const actualQuantity = quantity - (body.shortage || 0) + (body.extra || 0);
+                if (actualQuantity <= 0) {
+                    return { ok: false, error: `Actual quantity for lot ${lotNumber} must be greater than zero.` };
+                }
+                const warehouses = body.warehouses ? body.warehouses.map((id: string) => new mongoose.Types.ObjectId(id)) : [];
+                const tx = await Transaction.create({
+                    ...body,
+                    quantity: actualQuantity,
+                    enteredAt: new Date(`${date}T${time}:00Z`),
+                    party: new mongoose.Types.ObjectId(body.partyId),
+                    item: new mongoose.Types.ObjectId(body.itemId),
+                    unit: new mongoose.Types.ObjectId(body.unitId),
+                    warehouses,
+                });
+
+                results.push(tx);
+                affectedLotNumbers.add(lotNumber);
+            }
+
+            // Recalculate stock for all affected lot numbers
+            for (const lotNumber of affectedLotNumbers) {
+                await recalculateStock(lotNumber);
+            }
+            const populatedResults = await Transaction.populate(results, [
+                { path: 'party', select: 'name _id' },
+                { path: 'item', select: 'name category _id' },
+                { path: 'unit', select: 'name _id' },
+                { path: 'warehouses', select: 'name _id' },
+            ]);
+
+            return { ok: true, data: toPlain(populatedResults) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    // Stocks
+    ipcMain.handle('stocks:getAll', async (_e, params: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const pipeline = [
+                { $lookup: { from: 'parties', localField: 'party', foreignField: '_id', as: 'party' } },
+                { $unwind: '$party' },
+                { $lookup: { from: 'items', localField: 'item', foreignField: '_id', as: 'item' } },
+                { $unwind: '$item' },
+                { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
+                { $unwind: '$unit' },
+                { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
+                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, isNil: 1, chargeable: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, chargeRate: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: 1, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
+            ];
+            const { results: stocks, page, limit, total } = await handleFilteredQuery(params || {}, { model: Stock, pipeline, dateFields: ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt'] });
+
+            // Decrypt Party data in aggregation results
+            await decryptPartiesInAggregationResults(stocks);
+
+            return { ok: true, data: { stocks: toPlain(stocks), page, limit, total } };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('stocks:migrateLotNumbers', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Get all stocks populated with items and party
+            const stocks = await Stock.find().populate('item').populate('party');
+            let updatedCount = 0;
+
+            for (const stock of stocks) {
+                if (!stock.lotNumber || !stock.item || !stock.party) continue;
+
+                const parts = stock.lotNumber.split('|');
+                if (parts.length >= 3) {
+                    // Reconstruct lotNumber using the new format
+                    // generateAbbreviation logic for the full name format:
+                    const itemFullNameAbbrev = stock.item.name.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '-').toUpperCase();
+
+                    // partyAbbr | year | newItemAbbr | suffix
+                    const partyAbbr = parts[0];
+                    const finYear = parts[1];
+                    const suffix = parts.slice(3).join('|');
+
+                    const newLotNumber = `${partyAbbr}|${finYear}|${itemFullNameAbbrev}${suffix ? '|' + suffix : ''}`;
+
+                    if (stock.lotNumber !== newLotNumber) {
+                        const oldLotNumber = stock.lotNumber;
+
+                        // Update transactions linked to this old lotNumber
+                        await Transaction.updateMany(
+                            { lotNumber: oldLotNumber },
+                            { $set: { lotNumber: newLotNumber } }
+                        );
+
+                        // Update stock itself
+                        stock.lotNumber = newLotNumber;
+                        await stock.save();
+                        updatedCount++;
+                    }
+                }
+            }
+
+            return { ok: true, message: `Successfully migrated ${updatedCount} lot numbers!` };
+        } catch (e: any) {
+            console.error("Migration Error:", e);
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('stocks:migrateChargeRates', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const stocks = await Stock.find({
+                $or: [
+                    { chargeRate: { $exists: false } },
+                    { chargeRate: null }
+                ]
+            }).select('_id unit').lean();
+
+            let updatedCount = 0;
+
+            for (const stock of stocks) {
+                const unit = await Unit.findById(stock.unit).select('rate').lean<{ rate?: number }>();
+                if (typeof unit?.rate !== 'number') continue;
+
+                await Stock.updateOne(
+                    { _id: stock._id },
+                    { $set: { chargeRate: unit.rate } }
+                );
+                updatedCount += 1;
+            }
+
+            return { ok: true, data: { updatedCount } };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('stocks:getById', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const pipeline = [
+                { $match: { _id: new mongoose.Types.ObjectId(id) } },
+                { $lookup: { from: 'parties', localField: 'party', foreignField: '_id', as: 'party' } },
+                { $unwind: '$party' },
+                { $lookup: { from: 'items', localField: 'item', foreignField: '_id', as: 'item' } },
+                { $unwind: '$item' },
+                { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
+                { $unwind: '$unit' },
+                { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
+                { $lookup: { from: 'transactions', localField: 'lotNumber', foreignField: 'lotNumber', as: 'transactions' } },
+                { $addFields: { transactions: { $sortArray: { input: '$transactions', sortBy: { enteredAt: 1 } } } } },
+                { $project: { _id: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, chargeable: 1, isNil: 1, earliestEntryAt: 1, latestEntryAt: 1, lotNumber: 1, quantity: 1, chargeRate: 1, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { enteredAt: 1, type: 1, quantity: 1, shortage: 1, extra: 1, remark: 1, doNumber: 1, vehicleNumber: 1 }, createdAt: 1, updatedAt: 1, inwardDates: 1 } }
+            ];
+            const stock = await Stock.aggregate(pipeline);
+            if (stock.length === 0) return { ok: false, error: 'Stock not found' };
+
+            // Decrypt Party data in aggregation result
+            await decryptPartyInAggregationResult(stock[0]);
+
+            // add balance column
+            const transactions: any[] = stock[0].transactions as any[];
+            let balance = 0;
+            for (let i = 0; i < transactions.length; i++) {
+                if (transactions[i].type === 'INWARD' || transactions[i].type === 'RETURN') balance += transactions[i].quantity; else balance -= transactions[i].quantity;
+                (transactions[i] as any).balance = balance;
+            }
+            return { ok: true, data: toPlain(stock[0]) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Charges
+    ipcMain.handle('charges:getAll', async (_e, params: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const pipeline = [
+                { $lookup: { from: 'parties', localField: 'party', foreignField: '_id', as: 'party' } },
+                { $unwind: '$party' },
+                { $lookup: { from: 'items', localField: 'item', foreignField: '_id', as: 'item' } },
+                { $unwind: '$item' },
+                { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
+                { $unwind: '$unit' },
+                { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
+                { $lookup: { from: 'transactions', localField: 'transactions', foreignField: '_id', as: 'transactions' } },
+                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, chargeRate: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
+            ];
+            // Ensure data consistency by refreshing stale charges before querying
+            // Find all chargeable stocks that haven't been calculated in the last 24 hours
+            const staleThreshold = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+            const refreshFilterQuery = await buildFilterQuery(
+                { ...params, page: undefined, limit: undefined },
+                Stock,
+                ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt']
+            );
+
+            const staleStocks = await Stock.find({
+                ...refreshFilterQuery,
+                chargeable: true,
+                $or: [
+                    { lastCalculatedAt: { $lt: staleThreshold } },
+                    { lastCalculatedAt: { $exists: false } }
+                ]
+            }).select('lotNumber').lean();
+
+            if (staleStocks.length > 0) {
+
+                // Process in chunks
+                const chunk = (arr: any[], size: number) =>
+                    Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
+                        arr.slice(i * size, i * size + size)
+                    );
+
+                const batches = chunk(staleStocks, 50);
+                for (const batch of batches) {
+                    await Promise.all(batch.map((s: any) => ChargeService.calculateAndStore(s.lotNumber)));
+                }
+
+            }
+
+            const { results, page, limit, total } = await handleFilteredQuery(params || {}, { model: Stock, pipeline, dateFields: ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt'] });
+
+            // Decrypt Party data in aggregation results
+            await decryptPartiesInAggregationResults(results);
+
+            const finalResults: any[] = [];
+            for (const stock of results) {
+                if (stock.chargeable === false) {
+                    finalResults.push({ ...stock, totalCharge: 0, charge: 0 });
+                } else {
+                    try {
+                        // Try to get from ChargeService with fallback
+                        const chargeData = await ChargeService.getChargeWithFallback(stock.lotNumber);
+                        // Merge populated stock data with charge data
+                        const compatibleData = {
+                            ...stock, // Keep populated party, item, unit data from stock
+                            ...chargeData, // Override with charge calculation data
+                            charge: chargeData.totalCharge || chargeData.charge || 0,
+                            totalCharge: chargeData.totalCharge || chargeData.charge || 0,
+                            // Ensure we keep the populated references from stock
+                            party: stock.party,
+                            item: stock.item,
+                            unit: stock.unit,
+                            warehouses: stock.warehouses
+                        };
+                        finalResults.push(compatibleData);
+                    } catch (error) {
+                        // Final fallback to dynamic calculation
+                        const fallbackData = await computeChargesForLot(stock, true);
+                        const compatibleFallback = {
+                            ...stock, // Keep populated data from stock
+                            ...fallbackData, // Override with charge calculation data
+                            charge: fallbackData.totalCharge || fallbackData.charge || 0,
+                            totalCharge: fallbackData.totalCharge || fallbackData.charge || 0,
+                            // Ensure we keep the populated references from stock
+                            party: stock.party,
+                            item: stock.item,
+                            unit: stock.unit,
+                            warehouses: stock.warehouses
+                        };
+                        finalResults.push(compatibleFallback);
+                    }
+                }
+            }
+            // Calculate aggregation data for all matching records using MongoDB aggregation
+            const filterQuery = await buildFilterQuery(
+                { ...params, page: undefined, limit: undefined },
+                Stock,
+                ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt']
+            );
+
+            const aggregationPipeline = [
+                {
+                    $match: {
+                        ...filterQuery,
+                        chargeable: true // Only count chargeable items
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        grandTotal: { $sum: '$totalCharge' },
+                        chargeableCount: { $sum: 1 },
+                        totalRecords: { $sum: 1 }
+                    }
+                }
+            ];
+
+            const aggregationResult = await Stock.aggregate(aggregationPipeline);
+            const aggregationData = aggregationResult.length > 0 ? aggregationResult[0] : { grandTotal: 0, chargeableCount: 0, totalRecords: 0 };
+
+            return {
+                ok: true,
+                data: {
+                    results: toPlain(finalResults),
+                    page,
+                    limit,
+                    total,
+                    aggregation: {
+                        grandTotal: aggregationData.grandTotal || 0,
+                        chargeableCount: aggregationData.chargeableCount || 0,
+                        totalRecords: total // Use total from filtered query count
+                    }
+                }
+            };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+    ipcMain.handle('charges:getById', async (_e, stockId: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+
+            // Try to find stock by ID first
+            let matchCondition;
+            try {
+                matchCondition = { _id: new mongoose.Types.ObjectId(stockId) };
+            } catch (error) {
+                // If not a valid ObjectId, treat as lot number
+                matchCondition = { lotNumber: stockId };
+            }
+
+            const pipeline = [
+                { $match: matchCondition },
+                { $lookup: { from: 'parties', localField: 'party', foreignField: '_id', as: 'party' } },
+                { $unwind: '$party' },
+                { $lookup: { from: 'items', localField: 'item', foreignField: '_id', as: 'item' } },
+                { $unwind: '$item' },
+                { $lookup: { from: 'units', localField: 'unit', foreignField: '_id', as: 'unit' } },
+                { $unwind: '$unit' },
+                { $lookup: { from: 'warehouses', localField: 'warehouses', foreignField: '_id', as: 'warehouses' } },
+                { $lookup: { from: 'transactions', localField: 'transactions', foreignField: '_id', as: 'transactions' } },
+                { $project: { _id: 1, lotNumber: 1, quantity: 1, earliestEntryAt: 1, inwardDates: 1, latestEntryAt: 1, chargeable: 1, isNil: 1, chargeRate: 1, party: { name: 1, _id: 1 }, item: { name: 1, category: 1, _id: 1 }, unit: { name: 1, rate: 1, _id: 1 }, warehouses: { $map: { input: '$warehouses', as: 'w', in: { name: '$$w.name', _id: '$$w._id' } } }, transactions: { $map: { input: '$transactions', as: 't', in: { _id: '$$t._id', type: '$$t.type', enteredAt: '$$t.enteredAt', quantity: '$$t.quantity' } } }, createdAt: 1, updatedAt: 1 } }
+            ];
+            const { results } = await handleFilteredQuery({}, { model: Stock, pipeline, dateFields: ['earliestEntryAt', 'latestEntryAt', 'createdAt', 'updatedAt'] });
+            if (!results || results.length === 0) return { ok: false, error: 'Stock not found' };
+
+            const stock = results[0];
+
+            // Decrypt Party data in aggregation result
+            await decryptPartyInAggregationResult(stock);
+
+
+            // If not chargeable, return with zero charge
+            if (stock.chargeable === false) {
+                return { ok: true, data: toPlain({ ...stock, totalCharge: 0, charge: 0 }) };
+            }
+
+            // Try to get stored charge data from stock record first
+            try {
+                // Check if stock record has charge data
+                if (stock.chargeCalculated && stock.totalCharge !== undefined) {
+                    // For getById, we need breakdown data, so let's generate it using dynamic calculation
+                    try {
+                        const computed = await computeChargesForLot(stock, true);
+
+                        // Merge stock data with computed breakdown
+                        const result = {
+                            ...stock,
+                            totalCharge: stock.totalCharge,
+                            charge: stock.totalCharge,
+                            breakdown: computed.breakdown || [],
+                            anchorDate: stock.anchorDate,
+                            anniversaryDay: stock.anniversaryDay,
+                            firstMonth: stock.firstMonth,
+                            monthlyCharges: stock.monthlyCharges || []
+                        };
+
+                        await decryptPartyInAggregationResult(result);
+                        return { ok: true, data: toPlain(result) };
+                    } catch (breakdownError) {
+                        // Fall through to dynamic calculation
+                    }
+                }
+
+                // No stored charge data found, fall back to dynamic calculation
+                const computed = await computeChargesForLot(stock, true);
+
+                const compatibleComputed = {
+                    ...stock, // Keep populated data from stock
+                    ...computed, // Override with charge calculation data
+                    charge: computed.totalCharge || computed.charge || 0,
+                    totalCharge: computed.totalCharge || computed.charge || 0,
+                    // Ensure we keep the populated references from stock
+                    party: stock.party,
+                    item: stock.item,
+                    unit: stock.unit,
+                    warehouses: stock.warehouses
+                };
+
+                return { ok: true, data: toPlain(compatibleComputed) };
+            } catch (error) {
+                return { ok: false, error: `Failed to compute charges for lot ${stock.lotNumber}` };
+            }
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Party aggregation endpoints
+    ipcMain.handle('charges:getByParty', async (_e, partyId: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Convert to string if it's an ObjectId or object
+            let actualPartyId: string;
+            if (typeof partyId === 'object' && partyId !== null) {
+                if (partyId.toString && typeof partyId.toString === 'function') {
+                    actualPartyId = partyId.toString();
+                } else if ((partyId as any)._id) {
+                    actualPartyId = (partyId as any)._id.toString();
+                } else {
+                    return { ok: false, error: 'Invalid partyId format' };
+                }
+            } else {
+                actualPartyId = String(partyId);
+            }
+
+            const summary = await ChargeService.aggregateByParty(actualPartyId);
+            if (!summary) {
+                return { ok: false, error: 'No charges found for party' };
+            }
+
+            return { ok: true, data: toPlain(summary) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('charges:getAllParties', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const summaries = await ChargeService.aggregateAllParties();
+            return { ok: true, data: toPlain(summaries) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Batch processing endpoints
+    ipcMain.handle('charges:batchUpdate', async (_e, args: { lotNumbers: string[]; batchSize?: number }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { lotNumbers, batchSize } = args;
+            const result = await ChargeService.batchUpdateCharges(lotNumbers, batchSize);
+            return { ok: true, data: toPlain(result) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:backgroundUpdate', async (_e, args: { lotNumbers: string[]; options?: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { lotNumbers, options } = args;
+            const result = await ChargeService.backgroundUpdateCharges(lotNumbers, options);
+            return { ok: true, data: toPlain(result) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:getLotsNeedingRecalculation', async (_e, limit?: number) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const lotNumbers = await ChargeService.getLotsNeedingRecalculation(limit);
+            return { ok: true, data: lotNumbers };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Pagination endpoints
+    ipcMain.handle('charges:getByPartyPaginated', async (_e, args: { partyId: string; options?: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId, options } = args;
+            const result = await ChargeService.getByPartyPaginated(partyId, options);
+            return { ok: true, data: toPlain(result) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:getAllPartiesPaginated', async (_e, options?: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const result = await ChargeService.aggregateAllPartiesPaginated(options);
+            return { ok: true, data: toPlain(result) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Migration endpoints
+    ipcMain.handle('charges:migrateExisting', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { migrateExistingCharges } = await import('./utils/migration.js');
+            const result = await migrateExistingCharges();
+            return { ok: true, data: result };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:validateMigration', async (_e, sampleSize?: number) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { validateMigratedCharges } = await import('./utils/migration.js');
+            const result = await validateMigratedCharges(sampleSize);
+            return { ok: true, data: result };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:cleanupOrphaned', async (_e) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { cleanupOrphanedCharges } = await import('./utils/migration.js');
+            const result = await cleanupOrphanedCharges();
+            return { ok: true, data: result };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Billing integration endpoints
+    ipcMain.handle('charges:getUnbilledCharges', async (_e, args: { partyId: string; quarter: string; year: number }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId, quarter, year } = args;
+
+            // Get charges by party
+            const charges = await ChargeService.getByParty(partyId);
+
+            // Filter charges by quarter and year (Financial Year)
+            // FY starts in April. Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar (next year)
+            const quarterMonths = {
+                Q1: [4, 5, 6],
+                Q2: [7, 8, 9],
+                Q3: [10, 11, 12],
+                Q4: [1, 2, 3]
+            };
+
+            const relevantCharges = charges.filter((charge: any) => {
+                const dateToUse = charge.nilStockDate || charge.latestEntryAt || charge.anchorDate;
+                if (!dateToUse) return false;
+                const chargeDate = new Date(dateToUse);
+                const chargeYear = chargeDate.getFullYear();
+                const chargeMonth = chargeDate.getMonth() + 1;
+
+                // For Q1, Q2, Q3: logic is same year
+                // For Q4: logic is next year
+                const targetYear = quarter === 'Q4' ? year + 1 : year;
+
+                const isInQuarter = chargeYear === targetYear && quarterMonths[quarter as keyof typeof quarterMonths].includes(chargeMonth);
+                const isUnbilled = !charge.billingStatus || charge.billingStatus === 'unbilled';
+
+                return isInQuarter && isUnbilled;
+            });
+
+            return { ok: true, data: toPlain(relevantCharges) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:getQuarterCharges', async (_e, args: { partyId: string; quarter: string; year: number }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId, quarter, year } = args;
+
+            const quarterMonths = {
+                Q1: [4, 5, 6],
+                Q2: [7, 8, 9],
+                Q3: [10, 11, 12],
+                Q4: [1, 2, 3]
+            };
+
+            const targetYear = quarter === 'Q4' ? year + 1 : year;
+
+            const charges = await Stock.find({
+                party: new mongoose.Types.ObjectId(partyId),
+                chargeCalculated: true,
+                isNil: true,
+                chargeable: true
+            })
+                .populate('party', 'name')
+                .lean();
+
+            const relevantCharges = charges.filter((charge: any) => {
+                const dateToUse = charge.nilStockDate || charge.latestEntryAt || charge.anchorDate;
+                if (!dateToUse) return false;
+                const chargeDate = new Date(dateToUse);
+                const chargeYear = chargeDate.getFullYear();
+                const chargeMonth = chargeDate.getMonth() + 1;
+                return chargeYear === targetYear && quarterMonths[quarter as keyof typeof quarterMonths].includes(chargeMonth);
+            });
+
+            return { ok: true, data: toPlain(relevantCharges) };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:markChargesAsBilled', async (_e, args: { chargeIds: any[]; billId: string; billNumber: string }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { chargeIds, billId, billNumber } = args;
+
+            // Update charges to mark them as billed
+            // Convert chargeIds to ObjectIds with validation
+            const objectIds = chargeIds.map((id: any) => {
+                // Handle different input types: string, ObjectId, or object with _id
+                let stringId: string;
+
+                if (typeof id === 'string') {
+                    stringId = id;
+                } else if (id && typeof id === 'object') {
+                    // Handle ObjectId objects or objects with _id property
+                    if (id._id) {
+                        stringId = String(id._id);
+                    } else if (id.toString && typeof id.toString === 'function') {
+                        stringId = id.toString();
+                    } else {
+                        stringId = String(id);
+                    }
+                } else {
+                    stringId = String(id);
+                }
+
+                if (!mongoose.Types.ObjectId.isValid(stringId)) {
+                    throw new Error(`Invalid charge ID format: ${stringId} (original: ${JSON.stringify(id)})`);
+                }
+                return new mongoose.Types.ObjectId(stringId);
+            });
+            const stocks = await Stock.find({
+                _id: { $in: objectIds },
+                isNil: true,
+                chargeable: true
+            });
+
+            const bulkOps = stocks.map((stock: any) => {
+                const amount = stock.totalCharge || 0;
+                return {
+                    updateOne: {
+                        filter: { _id: stock._id },
+                        update: {
+                            $set: {
+                                billingStatus: 'billed',
+                                billedAmount: amount
+                            },
+                            $push: {
+                                associatedBills: {
+                                    billId,
+                                    billNumber,
+                                    amount,
+                                    billedAt: new Date().toISOString()
+                                }
+                            }
+                        }
+                    }
+                };
+            });
+
+            let modifiedCount = 0;
+            if (bulkOps.length > 0) {
+                const bulkResult = await Stock.bulkWrite(bulkOps);
+                modifiedCount = bulkResult.modifiedCount || 0;
+            }
+
+            return { ok: true, data: modifiedCount > 0 };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    ipcMain.handle('charges:validateChargesForBilling', async (_e, chargeIds: any[]) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Check if charges exist and are not already fully billed
+            // Convert chargeIds to ObjectIds with validation
+            const objectIds = chargeIds.map((id: any) => {
+                // Handle different input types: string, ObjectId, or object with _id
+                let stringId: string;
+
+                if (typeof id === 'string') {
+                    stringId = id;
+                } else if (id && typeof id === 'object') {
+                    // Handle ObjectId objects or objects with _id property
+                    if (id._id) {
+                        stringId = String(id._id);
+                    } else if (id.toString && typeof id.toString === 'function') {
+                        stringId = id.toString();
+                    } else {
+                        stringId = String(id);
+                    }
+                } else {
+                    stringId = String(id);
+                }
+
+                if (!mongoose.Types.ObjectId.isValid(stringId)) {
+                    throw new Error(`Invalid charge ID format: ${stringId} (original: ${JSON.stringify(id)})`);
+                }
+                return new mongoose.Types.ObjectId(stringId);
+            });
+            const charges = await Stock.find({
+                _id: { $in: objectIds },
+                isNil: true,
+                chargeable: true
+            });
+            const errors: string[] = [];
+
+            if (charges.length !== chargeIds.length) {
+                errors.push('Some charges not found');
+            }
+
+            for (const charge of charges) {
+                if (charge.billingStatus === 'billed') {
+                    errors.push(`Charge for lot ${charge.lotNumber} is already fully billed`);
+                }
+            }
+
+            return {
+                ok: true,
+                data: {
+                    valid: errors.length === 0,
+                    errors: errors.length > 0 ? errors : undefined
+                }
+            };
+        } catch (e: any) { return { ok: false, error: e.message }; }
+    });
+
+    // Bills CRUD handlers
+    ipcMain.handle('bills:getAll', async (_e, params?: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const {
+                page = 1,
+                limit = 10,
+                partyId,
+                status,
+                quarter,
+                year,
+                sort = 'billDate',
+                order = 'desc'
+            } = params || {};
+
+            // Build query filters
+            const query: any = {};
+
+            if (partyId) {
+                query.party = new mongoose.Types.ObjectId(partyId);
+            }
+
+            if (status) {
+                if (Array.isArray(status)) {
+                    query.status = { $in: status };
+                } else {
+                    query.status = status;
+                }
+            }
+
+            if (quarter) {
+                query.quarter = quarter;
+            }
+
+            if (year) {
+                query.year = year;
+            }
+
+            // Build sort object
+            const sortObj: any = {};
+            sortObj[sort] = order === 'asc' ? 1 : -1;
+
+            // Calculate pagination
+            const skip = (page - 1) * limit;
+
+            // Execute query with pagination
+            const [bills, total] = await Promise.all([
+                Bill.find(query)
+                    .sort(sortObj)
+                    .skip(skip)
+                    .limit(limit)
+                    .lean(),
+                Bill.countDocuments(query)
+            ]);
+
+
+
+            return {
+                ok: true,
+                data: {
+                    bills: toPlain(bills),
+                    pagination: {
+                        page,
+                        limit,
+                        total
+                    }
+                }
+            };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:getById', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const bill = await Bill.findById(id).populate('party', 'name address').lean();
+            if (!bill) {
+                return { ok: false, error: 'Bill not found' };
+            }
+
+            return { ok: true, data: toPlain(bill) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:create', async (_e, billData: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Validate required fields
+            if (!billData.billNumber || !billData.party || !billData.quarter || !billData.year || !billData.amount || !billData.billDate) {
+                return { ok: false, error: 'Missing required bill fields' };
+            }
+
+            // Validate bill amount is positive
+            if (billData.amount <= 0) {
+                return { ok: false, error: 'Bill amount must be greater than zero' };
+            }
+
+            // Validate quarter and year
+            if (!['Q1', 'Q2', 'Q3', 'Q4'].includes(billData.quarter)) {
+                return { ok: false, error: 'Invalid quarter. Must be Q1, Q2, Q3, or Q4' };
+            }
+
+            if (billData.year < 2000 || billData.year > 2100) {
+                return { ok: false, error: 'Invalid year' };
+            }
+
+            // Check if bill number already exists
+            const existingBill = await Bill.findOne({ billNumber: billData.billNumber });
+            if (existingBill) {
+                return { ok: false, error: 'Bill number already exists' };
+            }
+
+            // Create the bill
+            const bill = new Bill({
+                billNumber: billData.billNumber,
+                party: billData.party,
+                quarter: billData.quarter,
+                year: billData.year,
+                amount: billData.amount,
+                billDate: new Date(billData.billDate),
+                status: billData.status || 'unpaid',
+                paidAmount: billData.paidAmount || 0,
+                outstandingAmount: billData.outstandingAmount || billData.amount,
+                description: billData.description || undefined,
+                includedCharges: billData.includedCharges || undefined,
+                chargesSnapshot: billData.chargesSnapshot || undefined,
+                isSplit: billData.isSplit || false
+            });
+
+            await bill.save();
+
+            // Populate party details for immediate use (e.g., PDF generation)
+            await bill.populate('party', 'name address');
+
+            return { ok: true, data: toPlain(bill) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:update', async (_e, args: { id: string; updates: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { id, updates } = args;
+
+            // Find the existing bill
+            const existingBill = await Bill.findById(id);
+            if (!existingBill) {
+                return { ok: false, error: 'Bill not found' };
+            }
+
+            // Validate updates if provided
+            if (updates.amount !== undefined && updates.amount <= 0) {
+                return { ok: false, error: 'Bill amount must be greater than zero' };
+            }
+
+            if (updates.quarter && !['Q1', 'Q2', 'Q3', 'Q4'].includes(updates.quarter)) {
+                return { ok: false, error: 'Invalid quarter. Must be Q1, Q2, Q3, or Q4' };
+            }
+
+            if (updates.year && (updates.year < 2000 || updates.year > 2100)) {
+                return { ok: false, error: 'Invalid year' };
+            }
+
+            // Check if bill number is being changed and if it already exists
+            if (updates.billNumber && updates.billNumber !== existingBill.billNumber) {
+                const duplicateBill = await Bill.findOne({ billNumber: updates.billNumber });
+                if (duplicateBill) {
+                    return { ok: false, error: 'Bill number already exists' };
+                }
+            }
+
+            // Update the bill
+            const updatedBill = await Bill.findByIdAndUpdate(
+                id,
+                {
+                    ...updates,
+                    billDate: updates.billDate ? new Date(updates.billDate) : existingBill.billDate
+                },
+                { new: true }
+            );
+
+            if (!updatedBill) {
+                return { ok: false, error: 'Failed to update bill' };
+            }
+
+            return { ok: true, data: toPlain(updatedBill) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:delete', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Check if bill exists
+            const bill = await Bill.findById(id);
+            if (!bill) {
+                return { ok: false, error: 'Bill not found' };
+            }
+
+            // Check if there are any payments associated with this bill
+            const paymentsCount = await Payment.countDocuments({ bill: id });
+            if (paymentsCount > 0) {
+                return { ok: false, error: 'Cannot delete bill with existing payments. Delete payments first.' };
+            }
+
+            // If the bill has associated charges, unmark them as billed
+            const billData = bill as any;
+            if (billData.includedCharges && billData.includedCharges.length > 0) {
+                const chargeIds = billData.includedCharges.map((charge: any) => charge.chargeId);
+                await Stock.updateMany(
+                    { _id: { $in: chargeIds } },
+                    {
+                        $set: {
+                            billingStatus: 'unbilled'
+                        },
+                        $unset: {
+                            billedAmount: 1
+                        },
+                        $pull: {
+                            associatedBills: { billId: id }
+                        }
+                    }
+                );
+            }
+
+            // Delete the bill
+            await Bill.findByIdAndDelete(id);
+
+            return { ok: true, data: { success: true } };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:generatePdf', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Find the bill
+            const bill = await Bill.findById(id).lean();
+            if (!bill) {
+                return { ok: false, error: 'Bill not found' };
+            }
+
+            // Generate PDF file path
+            const billData = bill as any;
+            const fileName = `Bill_${billData.billNumber}_${billData.party.name.replace(/\s+/g, '_')}.pdf`;
+            const pdfDir = path.join(app.getPath('documents'), 'Warehouse_Bills');
+
+            // Ensure directory exists
+            try {
+                await fs.promises.mkdir(pdfDir, { recursive: true });
+            } catch (error) {
+                // Directory might already exist, ignore error
+            }
+
+            const pdfPath = path.join(pdfDir, fileName);
+
+            // Store PDF path in bill record
+            await Bill.findByIdAndUpdate(id, { pdfPath });
+
+            return { ok: true, data: { pdfPath } };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('bills:getFinancialSummary', async (_e, params?: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId } = params || {};
+
+            // Build aggregation pipeline to calculate financial summaries
+            const matchStage: any = {};
+            if (partyId) {
+                matchStage._id = new mongoose.Types.ObjectId(partyId);
+            }
+
+            // Get all parties
+            const parties = await Party.find(matchStage).lean();
+
+            // Decrypt party data
+            const middleware = new MongooseEncryptionMiddleware();
+            for (const party of parties) {
+                await middleware.decryptFields(party, Party.schema);
+            }
+
+            const financialSummaries = [];
+
+            for (const party of parties) {
+                // Get bills for this party
+                const bills = await Bill.find({ party: party._id as any }).lean();
+
+                // Get payments for this party
+                const payments = await Payment.find({ party: party._id as any }).lean();
+
+                // Calculate totals
+                const totalBilled = bills.reduce((sum, bill) => sum + bill.amount, 0);
+                const billPayments = payments.filter((payment: any) => normalizePaymentFor(payment.paymentFor) === 'bill_payment');
+                const rentPayments = payments.filter((payment: any) => isRentPayment(payment.paymentFor));
+                const totalPaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+                const outstandingBalance = totalBilled - billPayments.reduce((sum, payment) => sum + payment.amount, 0);
+                const totalRent = rentPayments.reduce((sum, payment) => sum + payment.amount, 0);
+
+                // Get charges for this party (for total charges calculation)
+                let totalCharges = 0;
+                try {
+                    const charges = await ChargeService.getByParty((party._id as any).toString());
+                    totalCharges = charges.reduce((sum: number, charge: any) => sum + (charge.totalCharge || 0), 0);
+                } catch (error) {
+                    console.warn('Could not fetch charges for party:', party._id as any, error);
+                }
+                // Find latest dates
+                const lastBillDate = bills.length > 0
+                    ? bills.sort((a, b) => new Date(b.billDate).getTime() - new Date(a.billDate).getTime())[0].billDate
+                    : undefined;
+
+                const lastPaymentDate = payments.length > 0
+                    ? payments.sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime())[0].paymentDate
+                    : undefined;
+
+                financialSummaries.push({
+                    party: {
+                        _id: (party._id as any).toString(),
+                        name: party.name as any
+                    },
+                    totalCharges,
+                    totalRent,
+                    totalBilled,
+                    totalPaid,
+                    outstandingBalance,
+                    lastBillDate,
+                    lastPaymentDate,
+                    billCount: bills.length,
+                    paymentCount: payments.length,
+                    rentPaymentCount: rentPayments.length
+                });
+            }
+
+            return { ok: true, data: financialSummaries };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    // Payments CRUD handlers
+    ipcMain.handle('payments:getAll', async (_e, params?: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const middleware = new MongooseEncryptionMiddleware();
+
+            const {
+                page = 1,
+                limit = 10,
+                partyId,
+                billId,
+                paymentMethod,
+                sort = 'paymentDate',
+                order = 'desc'
+            } = params || {};
+
+            // Build query filters
+            const query: any = {};
+
+            if (partyId) {
+                query.party = new mongoose.Types.ObjectId(partyId);
+            }
+
+            if (billId) {
+                query.bill = new mongoose.Types.ObjectId(billId);
+            }
+
+            if (paymentMethod) {
+                query.paymentMethod = paymentMethod;
+            }
+
+            // Build sort object
+            const sortObj: any = {};
+            sortObj[sort] = order === 'asc' ? 1 : -1;
+
+            // Calculate pagination
+            const skip = (page - 1) * limit;
+
+            // Execute query with pagination
+            const [payments, total] = await Promise.all([
+                Payment.find(query)
+                    .sort(sortObj)
+                    .skip(skip)
+                    .limit(limit)
+                    .lean(),
+                Payment.countDocuments(query)
+            ]);
+
+
+
+            for (const payment of payments) {
+                await middleware.decryptFields(payment, Payment.schema);
+                (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
+            }
+
+            return {
+                ok: true,
+                data: {
+                    payments: toPlain(payments),
+                    pagination: {
+                        page,
+                        limit,
+                        total
+                    }
+                }
+            };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('payments:getById', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+            const middleware = new MongooseEncryptionMiddleware();
+
+            const payment = await Payment.findById(id).lean();
+            if (!payment) {
+                return { ok: false, error: 'Payment not found' };
+            }
+
+            await middleware.decryptFields(payment, Payment.schema);
+            (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
+
+            return { ok: true, data: toPlain(payment) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('payments:create', async (_e, paymentData: any) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const paymentFor = normalizePaymentFor(paymentData.paymentFor);
+
+            if (!paymentData.paymentNumber || !paymentData.party || !paymentData.amount || !paymentData.paymentMethod || !paymentData.paymentDate) {
+                return { ok: false, error: 'Missing required payment fields' };
+            }
+
+            if (paymentData.amount <= 0) {
+                return { ok: false, error: 'Payment amount must be greater than zero' };
+            }
+
+            const paymentDate = new Date(paymentData.paymentDate);
+            const today = new Date();
+            today.setHours(23, 59, 59, 999);
+            if (paymentDate > today) {
+                return { ok: false, error: 'Payment date cannot be in the future' };
+            }
+
+            let bill = null;
+            if (paymentData.bill) {
+                bill = await Bill.findById(paymentData.bill);
+                if (!bill) {
+                    return { ok: false, error: 'Bill not found' };
+                }
+                if (bill.party.toString() !== paymentData.party) {
+                    return { ok: false, error: 'Selected bill does not belong to the selected party' };
+                }
+            }
+
+            if (paymentFor === 'bill_payment') {
+                if (!bill) {
+                    return { ok: false, error: 'Bill is required for bill payments' };
+                }
+
+                if (paymentData.amount > bill.outstandingAmount) {
+                    return { ok: false, error: `Payment amount (₹${paymentData.amount}) exceeds outstanding amount (₹${bill.outstandingAmount})` };
+                }
+            } else {
+                if (!paymentData.quarter || !paymentData.financialYear || !paymentData.description?.trim()) {
+                    return { ok: false, error: 'Quarter, financial year, and description are required for rent payments' };
+                }
+            }
+
+            const payment = new Payment({
+                paymentNumber: paymentData.paymentNumber,
+                paymentFor,
+                bill: bill?._id,
+                party: paymentData.party,
+                amount: paymentData.amount,
+                paymentMethod: paymentData.paymentMethod,
+                paymentDate,
+                financialYear: paymentFor === 'rent' ? paymentData.financialYear : undefined,
+                quarter: paymentFor === 'rent' ? paymentData.quarter : undefined,
+                description: paymentFor === 'rent' ? paymentData.description?.trim() : undefined,
+                bankDetails: paymentData.bankDetails || undefined,
+                notes: paymentData.notes || undefined
+            });
+
+            await payment.save();
+            await payment.populate('party', 'name');
+            if (bill) {
+                await payment.populate('bill', 'billNumber');
+            }
+            const middleware = new MongooseEncryptionMiddleware();
+            await middleware.decryptFields(payment, Payment.schema);
+            (payment as any).paymentFor = normalizePaymentFor((payment as any).paymentFor);
+
+            if (paymentFor === 'bill_payment' && bill) {
+                const newPaidAmount = bill.paidAmount + paymentData.amount;
+                const newOutstandingAmount = bill.amount - newPaidAmount;
+
+                let newStatus = 'unpaid';
+                if (newOutstandingAmount === 0) {
+                    newStatus = 'paid';
+                } else if (newPaidAmount > 0) {
+                    newStatus = 'partial';
+                }
+
+                await Bill.findByIdAndUpdate(
+                    bill._id,
+                    {
+                        paidAmount: newPaidAmount,
+                        outstandingAmount: newOutstandingAmount,
+                        status: newStatus
+                    },
+                    { new: true }
+                );
+            }
+
+            return { ok: true, data: toPlain(payment) };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('payments:update', async (_e, args: { id: string; updates: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { id, updates } = args;
+
+            // Find the existing payment
+            const existingPayment = await Payment.findById(id);
+            if (!existingPayment) {
+                return { ok: false, error: 'Payment not found' };
+            }
+
+            // Validate updates if provided
+            if (updates.amount !== undefined && updates.amount <= 0) {
+                return { ok: false, error: 'Payment amount must be greater than zero' };
+            }
+
+            // Validate payment date is not in future if being updated
+            if (updates.paymentDate) {
+                const paymentDate = new Date(updates.paymentDate);
+                const today = new Date();
+                today.setHours(23, 59, 59, 999);
+                if (paymentDate > today) {
+                    return { ok: false, error: 'Payment date cannot be in the future' };
+                }
+            }
+
+            const existingPaymentFor = normalizePaymentFor((existingPayment as any).paymentFor);
+
+            if (existingPaymentFor === 'bill_payment' && updates.amount !== undefined && updates.amount !== existingPayment.amount) {
+                const bill = await Bill.findById(existingPayment.bill);
+                if (!bill) {
+                    return { ok: false, error: 'Associated bill not found' };
+                }
+
+                // Calculate new bill amounts
+                const amountDifference = updates.amount - existingPayment.amount;
+                const newPaidAmount = bill.paidAmount + amountDifference;
+                const newOutstandingAmount = bill.amount - newPaidAmount;
+
+                // Validate that new payment amount doesn't exceed bill amount
+                if (newPaidAmount > bill.amount) {
+                    return { ok: false, error: 'Updated payment amount would exceed bill amount' };
+                }
+
+                // Determine new bill status
+                let newStatus = 'unpaid';
+                if (newOutstandingAmount === 0) {
+                    newStatus = 'paid';
+                } else if (newPaidAmount > 0) {
+                    newStatus = 'partial';
+                }
+
+                // Update the payment
+                const updatedPayment = await Payment.findByIdAndUpdate(
+                    id,
+                    {
+                        ...updates,
+                        paymentDate: updates.paymentDate ? new Date(updates.paymentDate) : existingPayment.paymentDate
+                    },
+                    { new: true }
+                );
+
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(updatedPayment, Payment.schema);
+                (updatedPayment as any).paymentFor = normalizePaymentFor((updatedPayment as any).paymentFor);
+
+                // Update the bill
+                await Bill.findByIdAndUpdate(
+                    bill._id,
+                    {
+                        paidAmount: newPaidAmount,
+                        outstandingAmount: newOutstandingAmount,
+                        status: newStatus
+                    }
+                );
+
+                return { ok: true, data: toPlain(updatedPayment) };
+            } else {
+                // Simple update without amount change
+                const updatedPayment = await Payment.findByIdAndUpdate(
+                    id,
+                    {
+                        ...updates,
+                        paymentDate: updates.paymentDate ? new Date(updates.paymentDate) : existingPayment.paymentDate
+                    },
+                    { new: true }
+                );
+
+                if (!updatedPayment) {
+                    return { ok: false, error: 'Failed to update payment' };
+                }
+
+                const middleware = new MongooseEncryptionMiddleware();
+                await middleware.decryptFields(updatedPayment, Payment.schema);
+                (updatedPayment as any).paymentFor = normalizePaymentFor((updatedPayment as any).paymentFor);
+
+                return { ok: true, data: toPlain(updatedPayment) };
+            }
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('payments:delete', async (_e, id: string) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            // Find the payment
+            const payment = await Payment.findById(id);
+            if (!payment) {
+                return { ok: false, error: 'Payment not found' };
+            }
+
+            const paymentFor = normalizePaymentFor((payment as any).paymentFor);
+            if (paymentFor === 'bill_payment') {
+                const bill = await Bill.findById(payment.bill);
+                if (!bill) {
+                    return { ok: false, error: 'Associated bill not found' };
+                }
+
+                const newPaidAmount = bill.paidAmount - payment.amount;
+                const newOutstandingAmount = bill.amount - newPaidAmount;
+
+                let newStatus = 'unpaid';
+                if (newOutstandingAmount === 0) {
+                    newStatus = 'paid';
+                } else if (newPaidAmount > 0) {
+                    newStatus = 'partial';
+                }
+
+                await Payment.findByIdAndDelete(id);
+                await Bill.findByIdAndUpdate(
+                    bill._id,
+                    {
+                        paidAmount: newPaidAmount,
+                        outstandingAmount: newOutstandingAmount,
+                        status: newStatus
+                    }
+                );
+            } else {
+                await Payment.findByIdAndDelete(id);
+            }
+
+            return { ok: true, data: { success: true } };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+
+    ipcMain.handle('payments:getBillingHistory', async (_e, args: { partyId: string; params?: any }) => {
+        try {
+            await initMongo();
+            validateEventFrame(_e.senderFrame);
+
+            const { partyId, params } = args;
+            const { startDate, endDate } = params || {};
+
+            const getRentQuarterStartDate = (quarter: string, financialYear: number): Date => {
+                let month = 3; // April (0-indexed: 3)
+                let year = financialYear;
+
+                if (quarter === 'Q1') {
+                    month = 3;
+                } else if (quarter === 'Q2') {
+                    month = 6;
+                } else if (quarter === 'Q3') {
+                    month = 9;
+                } else if (quarter === 'Q4') {
+                    month = 0;
+                    year = financialYear + 1;
+                }
+
+                return new Date(Date.UTC(year, month, 1, 0, 0, 0, 0));
+            };
+
+            // Get all bills for the party (unfiltered by date for running balance correctness)
+            const bills = await Bill.find({ party: new mongoose.Types.ObjectId(partyId) })
+                .populate('party', 'name')
+                .lean();
+
+            // Get all payments for the party (unfiltered by date for running balance correctness)
+            const payments = await Payment.find({ party: new mongoose.Types.ObjectId(partyId) })
+                .populate('party', 'name')
+                .populate('bill', 'billNumber quarter year billDate')
+                .lean();
+
+            const middleware = new MongooseEncryptionMiddleware();
+            for (const payment of payments) {
+                await middleware.decryptFields(payment, Payment.schema);
+            }
+
+            // Combine and format the history items
+            const historyItems: any[] = [];
+
+            // Add bills to history
+            bills.forEach((bill: any) => {
+                historyItems.push({
+                    _id: bill._id.toString(),
+                    type: 'bill',
+                    date: bill.billDate,
+                    amount: bill.amount,
+                    description: `Bill for ${bill.quarter} ${bill.year}-${(bill.year + 1).toString().slice(-2)}`,
+                    quarter: bill.quarter,
+                    financialYear: bill.year,
+                    billNumber: bill.billNumber,
+                    billDate: bill.billDate,
+                    billQuarter: bill.quarter,
+                    billYear: bill.year,
+                    runningBalance: 0
+                });
+            });
+
+            // Add payments to history
+            payments.forEach((payment: any) => {
+                const paymentFor = normalizePaymentFor(payment.paymentFor);
+                
+                // Determine aligned date: associated billDate for bill_payment, quarter start date for rent
+                let itemDate = payment.paymentDate;
+                if (paymentFor === 'bill_payment' && payment.bill?.billDate) {
+                    itemDate = payment.bill.billDate;
+                } else if (paymentFor === 'rent' && payment.quarter && payment.financialYear) {
+                    itemDate = getRentQuarterStartDate(payment.quarter, payment.financialYear);
+                }
+
+                historyItems.push({
+                    _id: payment._id.toString(),
+                    type: 'payment',
+                    date: itemDate,
+                    amount: payment.amount,
+                    description: paymentFor === 'rent'
+                        ? (payment.description?.trim() || payment.notes?.trim() || 'Rent')
+                        : payment.notes?.trim()
+                        ? payment.notes.trim()
+                        : `Payment for Bill ${payment.bill?.billNumber || ''}`.trim(),
+                    quarter: paymentFor === 'rent' ? payment.quarter : payment.bill?.quarter,
+                    financialYear: paymentFor === 'rent' ? payment.financialYear : payment.bill?.year,
+                    billId: payment.bill?._id?.toString(),
+                    billNumber: payment.bill?.billNumber,
+                    billDate: payment.bill?.billDate,
+                    billQuarter: payment.bill?.quarter,
+                    billYear: payment.bill?.year,
+                    paymentNumber: payment.paymentNumber,
+                    paymentFor,
+                    paymentMethod: payment.paymentMethod,
+                    paymentDate: payment.paymentDate,
+                    bankDetails: payment.bankDetails,
+                    notes: payment.notes,
+                    runningBalance: 0
+                });
+            });
+
+            // Sort by date (oldest first for running balance calculation)
+            historyItems.sort((a, b) => {
+                const dateA = new Date(a.date).getTime();
+                const dateB = new Date(b.date).getTime();
+                if (dateA !== dateB) return dateA - dateB;
+
+                if (a.type !== b.type) {
+                    const typeOrder: Record<string, number> = {
+                        bill: 0,
+                        payment: 2,
+                    };
+                    return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+                }
+
+                // Fallback to ID for stability
+                return a._id.localeCompare(b._id);
+            });
+
+            // Calculate running balance across all history
+            let runningBalance = 0;
+            historyItems.forEach(item => {
+                if (item.type === 'bill') {
+                    runningBalance += item.amount;
+                } else if (item.type === 'payment' && item.paymentFor !== 'rent') {
+                    runningBalance -= item.amount;
+                }
+                item.runningBalance = runningBalance;
+            });
+
+            // Sort by date (newest first for display)
+            historyItems.sort((a, b) => {
+                const dateA = new Date(a.date).getTime();
+                const dateB = new Date(b.date).getTime();
+                if (dateA !== dateB) return dateB - dateA; // Descending
+
+                if (a.type !== b.type) {
+                    const typeOrder: Record<string, number> = {
+                        payment: 0,
+                        bill: 2,
+                    };
+                    return (typeOrder[a.type] ?? 99) - (typeOrder[b.type] ?? 99);
+                }
+
+                return b._id.localeCompare(a._id);
+            });
+
+            return { ok: true, data: historyItems };
+        } catch (e: any) {
+            return { ok: false, error: e.message };
+        }
+    });
+}
+
+app.on("ready", async () => {
+    // Don't fail hard on missing URI; allow UI to prompt user to set it.
+    try { await initMongo(); } catch (e) { /* ignore at startup */ }
+    registerIpcHandlers();
+
+    if (process.platform === 'darwin' && app.dock) {
+        try {
+            app.dock.setIcon(path.join(getAssetsPath() + '/icon.png'));
+        } catch (e) {
+            console.error('Failed to set macOS dock icon:', e);
+        }
+    }
+
+    const isMacOS = process.platform === 'darwin';
+
+    const mainWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+
+        icon: path.join(getAssetsPath() + '/icon@5x.png'),
+        titleBarStyle: isMacOS ? 'hiddenInset' : 'hidden',
+        trafficLightPosition: isMacOS ? { x: 16, y: 12 } : undefined,
+        webPreferences: {
+            preload: getPreloadPath(),
+            // Disable DevTools in production
+            devTools: isDev(),
+        }
+    });
+    // mainWindow.maximize();
+    // Remove and hide the menu bar across platforms
+    if (!isDev()) {
+        try {
+            Menu.setApplicationMenu(null);
+        } catch { }
+        mainWindow.setMenuBarVisibility(false);
+        try { mainWindow.setMenu(null); } catch { }
+    }
+
+    if (isDev()) {
+        mainWindow.loadURL("http://localhost:5123")
+    } else {
+        mainWindow.loadFile(getUIPath());
+    }
+    // Window control IPC handlers
+    ipcMain.handle('window:minimize', () => {
+        const win = BrowserWindow.getFocusedWindow();
+        if (win) win.minimize();
+        return { ok: true };
+    });
+    ipcMain.handle('window:toggleMaximize', () => {
+        const win = BrowserWindow.getFocusedWindow();
+        if (!win) return { ok: false };
+        if (win.isMaximized()) {
+            win.unmaximize();
+            return { ok: true, maximized: false };
+        } else {
+            win.maximize();
+            return { ok: true, maximized: true };
+        }
+    });
+    ipcMain.handle('window:close', () => {
+        const win = BrowserWindow.getFocusedWindow();
+        if (win) win.close();
+        return { ok: true };
+    });
+    ipcMain.handle('pdf:download', async (_e, dataURL: string, sanitizedFileName: string) => {
+        const currentWindow = BrowserWindow.getFocusedWindow();
+        if (!currentWindow) return { ok: false };
+        if (currentWindow && !currentWindow.isDestroyed()) {
+            const { filePath } = await dialog.showSaveDialog(currentWindow, {
+                defaultPath: sanitizedFileName,
+                filters: [{ name: 'PDF Files', extensions: ['pdf'] }]
+            });
+
+            if (filePath) {
+                let storedPdfBuffer = Buffer.from(dataURL.split(',')[1], 'base64');
+                await fs.promises.writeFile(filePath, storedPdfBuffer);
+                return { ok: true, filePath };
+            }
+        }
+        return { ok: false };
+    })
+
+    ipcMain.handle('window:previewPdf', async (_e, dataURL: string, fileName: string) => {
+        try {
+            validateEventFrame(_e.senderFrame);
+            if (!dataURL || !dataURL.startsWith('data:application/pdf;')) {
+                throw new Error('Invalid PDF data');
+            }
+            const sanitizedFileName = fileName.replace(/[<>:"/\\|?*]/g, '_');
+
+            //chek if a preview window is already open for same file name, if so focus it and return
+            //check if no filename, check window with starting PDF Preview and use that one as win
+            const allWindows = BrowserWindow.getAllWindows();
+            const existingWindow = allWindows.find(w => w.getTitle() === ('PDF Preview - ' + sanitizedFileName));
+            if (existingWindow) {
+                if (existingWindow.isMinimized()) existingWindow.restore();
+                existingWindow.focus();
+                return { ok: true };
+            }
+
+            const win = new BrowserWindow({
+                width: 800,
+                height: 600,
+                title: 'PDF Preview - ' + sanitizedFileName,
+                frame: process.platform !== 'darwin' ? false : true,
+                alwaysOnTop: true,
+                titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : undefined,
+                trafficLightPosition: process.platform === 'darwin' ? { x: 16, y: 14 } : undefined,
+                webPreferences: {
+                    nodeIntegration: false,
+                    contextIsolation: true,
+                    preload: getPdfPreviewPreloadPath(),
+                },
+            })
+            ipcMain.once('pdf-preview:ready', (event) => {
+                if (event.sender !== win.webContents) return;
+                win.webContents.send('pdf-preview:data', {
+                    dataUri: dataURL,
+                    fileName: sanitizedFileName,
+                    platform: process.platform,
+                });
+            });
+
+            await win.loadFile(path.join(getAssetsPath(), 'pdf-viewer.html'));
+
+            return { ok: true };
+        } catch (error) {
+            console.error('Error previewing PDF:', error);
+            return { ok: false, error: (error as Error).message };
+        }
+    });
+
+
+    const tray = createTray(mainWindow);
+    // Setup auto-updater only in production builds
+    if (!isDev()) {
+        if (autoUpdater) {
+            setupAutoUpdater(mainWindow, tray);
+        } else {
+            // Optionally log or notify once that updater is unavailable
+            try { dialog.showMessageBox({ type: 'warning', message: 'Auto-updater module not available. Update checks will be disabled.' }); } catch { }
+        }
+        // If UPDATE_URL is provided, use it as a generic provider
+        try {
+            if (autoUpdater) {
+                const feed = process.env.UPDATE_URL;
+                if (feed && typeof feed === 'string' && feed.startsWith('http')) {
+                    autoUpdater.setFeedURL({ provider: 'generic', url: feed });
+                }
+            }
+        } catch { }
+        // Optional: immediately check for updates on startup
+        try { autoUpdater && autoUpdater.checkForUpdatesAndNotify().catch(() => { }); } catch { }
+    }
+    handleCloseEvent(mainWindow);
+});
+
+function createTray(mainWindow: BrowserWindow) {
+    const trayIcon = process.platform === 'darwin'
+        ? nativeImage
+            .createFromPath(path.join(getAssetsPath() + '/logo_grayscale.png'))
+            .resize({ width: 18, height: 18 })
+        : path.join(getAssetsPath() + '/icon@5x.png');
+    const tray = new Tray(trayIcon);
+    tray.setToolTip(process.env.VITE_APP_NAME || 'Warehouse CRM');
+    if (process.platform === 'darwin') {
+        tray.setIgnoreDoubleClickEvents(true);
+    }
+    tray.on('click', () => mainWindow.show());
+    tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'Show', click: () => mainWindow.show() },
+        {
+            label: 'Check for updates', click: () => {
+                if (isDev()) {
+                    dialog.showMessageBox({ type: 'info', message: 'Auto-update is disabled in development.' });
+                    return;
+                }
+                if (!autoUpdater) {
+                    dialog.showErrorBox('Update check failed', 'Auto-updater module is not available. Ensure "electron-updater" is installed and included in dependencies.');
+                    return;
+                }
+                try {
+                    autoUpdater.checkForUpdates().catch((err: any) => {
+                        dialog.showErrorBox('Update check failed', (err && err.message) || String(err));
+                    });
+                } catch (err: any) {
+                    dialog.showErrorBox('Update check failed', err?.message || String(err));
+                }
+            }
+        },
+        { type: 'separator' },
+        { role: 'quit', label: 'Quit', click: () => app.quit() }
+    ]));
+    return tray;
+}
+
+function handleCloseEvent(mainWindow: BrowserWindow) {
+    let willClose = false;
+    mainWindow.on('close', (e) => {
+        if (!willClose) {
+            e.preventDefault();
+            mainWindow.hide();
+        }
+    });
+    app.on('before-quit', () => willClose = true);
+    mainWindow.on('show', () => willClose = false);
+    return willClose;
+}

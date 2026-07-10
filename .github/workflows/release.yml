@@ -1,0 +1,62 @@
+name: Release App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build & Release for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dependencies
+        run: npm i
+
+      - name: Create .env Configuration
+        shell: bash
+        run: |
+          echo "VITE_APP_NAME=${{ secrets.APP_NAME || 'Warehouse CRM' }}" >> .env
+          echo "VITE_APP_NAME=${{ secrets.APP_NAME || 'Warehouse CRM' }}" >> $GITHUB_ENV
+
+      - name: Set Current Repo for Release
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const config = JSON.parse(fs.readFileSync('electron-builder.json', 'utf8'));
+            if (!config.publish) config.publish = [{ provider: 'github' }];
+            config.publish[0].owner = '${{ github.repository_owner }}';
+            config.publish[0].repo = '${{ github.event.repository.name }}';
+            fs.writeFileSync('electron-builder.json', JSON.stringify(config, null, 4));
+          "
+
+      - name: Build & Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            npm run dist:win -- --publish always
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            npm run dist:mac -- --publish always -c.mac.identity=null
+          else
+            npm run dist:linux -- --publish always
+          fi
