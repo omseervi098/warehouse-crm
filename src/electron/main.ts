@@ -3,6 +3,7 @@ import { EJSON } from 'bson';
 import dotenv from 'dotenv';
 import keytar from 'keytar';
 import mongoose from 'mongoose';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -38,6 +39,9 @@ const require = createRequire(import.meta.url);
 const AdmZip: any = require('adm-zip');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Papa: any = require('papaparse');
+
+// Public DNS so mongodb+srv works when local/ISP resolvers fail SRV/TXT lookups
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 
 if (app.isPackaged) {
     dotenv.config({ path: path.join(process.resourcesPath, '.env') });
