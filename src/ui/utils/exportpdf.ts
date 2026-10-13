@@ -886,23 +886,36 @@ export async function downloadBillPdf(bill: Bill) {
   // --- Main Table ---
 
   const getQuarterDates = (quarter: string, year: number) => {
-    const qMap = { 'Q1': 0, 'Q2': 3, 'Q3': 6, 'Q4': 9 };
-    const startMonth = qMap[quarter as keyof typeof qMap];
+    // Financial year, same as the rest of billing: Q1 Apr–Jun, Q2 Jul–Sep,
+    // Q3 Oct–Dec of `year`; Q4 is Jan–Mar of the next calendar year.
+    const qMap: Record<string, { startMonth: number; calendarYear: number }> = {
+      Q1: { startMonth: 3, calendarYear: year },
+      Q2: { startMonth: 6, calendarYear: year },
+      Q3: { startMonth: 9, calendarYear: year },
+      Q4: { startMonth: 0, calendarYear: year + 1 },
+    };
+    const spec = qMap[quarter] ?? qMap.Q1;
+
+    const format = (date: Date) => {
+      const dd = String(date.getDate()).padStart(2, '0');
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      return `${dd}/${mm}/${date.getFullYear()}`;
+    };
 
     const months = [];
     for (let i = 0; i < 3; i++) {
-      const m = startMonth + i;
-      const start = new Date(year, m, 1);
-      const end = new Date(year, m + 1, 0);
+      const m = spec.startMonth + i;
+      const start = new Date(spec.calendarYear, m, 1);
+      const end = new Date(spec.calendarYear, m + 1, 0);
       months.push({
-        start: start.toLocaleDateString('en-GB'),
-        end: end.toLocaleDateString('en-GB'),
-        name: start.toLocaleString('default', { month: 'long' })
+        start: format(start),
+        end: format(end),
+        name: start.toLocaleString('en-GB', { month: 'long' })
       });
     }
-    const qStart = new Date(year, startMonth, 1);
-    const qEnd = new Date(year, startMonth + 3, 0);
-    return { months, full: { start: qStart.toLocaleDateString('en-GB'), end: qEnd.toLocaleDateString('en-GB') } };
+    const qStart = new Date(spec.calendarYear, spec.startMonth, 1);
+    const qEnd = new Date(spec.calendarYear, spec.startMonth + 3, 0);
+    return { months, full: { start: format(qStart), end: format(qEnd) } };
   };
 
   const { months, full } = getQuarterDates(bill.quarter, bill.year);
@@ -1051,7 +1064,7 @@ export async function downloadBillPdf(bill: Bill) {
   doc.line(margin, totalLineY, pageW - margin, totalLineY);
 
   // AMOUNT IN WORDS inside body
-  const amountWords = (numberToWords(Math.round(bill.amount)) + ' ONLY').split(' ');
+  const amountWords = `Rs. ${numberToWords(Math.round(bill.amount)).trim()} ONLY`.split(/\s+/);
   const mid = amountWords.length / 2;
   const firstLine = amountWords.slice(0, mid).join(' ');
   const secondLine = amountWords.slice(mid).join(' ');
@@ -1083,23 +1096,12 @@ export async function downloadBillPdf(bill: Bill) {
   // --- Footer Section ---
   const footerY = tableBottomY;
 
-
   // For Title (Right side)
   doc.setFontSize(9);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(50, 50, 150);
 
   doc.text(`For ${companyName.toUpperCase()}`, pageW - margin - 5, footerY + 6, { align: 'right' });
-
-  // Payment Terms (Bottom Left)
-  doc.setFont('helvetica', 'normal');
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(8);
-  doc.text('• Payment by Crossed & Order Cheque is Requested.', margin + 5, footerY + 12);
-  doc.text('• Payment Within _______ days otherwise interest@ _______%', margin + 5, footerY + 17);
-  doc.text('  Will be charged.', margin + 5, footerY + 22);
-
-  // Signature Space
 
   await previewPdf(doc, `Bill_${bill.billNumber}`);
 }
