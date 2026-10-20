@@ -2288,7 +2288,10 @@ function registerIpcHandlers() {
                 description: billData.description || undefined,
                 includedCharges: billData.includedCharges || undefined,
                 chargesSnapshot: billData.chargesSnapshot || undefined,
-                isSplit: billData.isSplit || false
+                isSplit: billData.isSplit || false,
+                particulars: typeof billData.particulars === 'string' && billData.particulars.trim()
+                    ? billData.particulars
+                    : undefined
             });
 
             await bill.save();
